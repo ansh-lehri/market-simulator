@@ -1,0 +1,47 @@
+# 2026/09/18 22:39:58.273074 [TestBook_Determinism_SameOpsProduceSameState] [rapid] draw opCount: 3
+# 2026/09/18 22:39:58.273087 [TestBook_Determinism_SameOpsProduceSameState] [rapid] draw op: "insert"
+# 2026/09/18 22:39:58.273098 [TestBook_Determinism_SameOpsProduceSameState] [rapid] draw side: 0
+# 2026/09/18 22:39:58.273106 [TestBook_Determinism_SameOpsProduceSameState] [rapid] draw price: 10
+# 2026/09/18 22:39:58.273113 [TestBook_Determinism_SameOpsProduceSameState] [rapid] draw qty: 4
+# 2026/09/18 22:39:58.273122 [TestBook_Determinism_SameOpsProduceSameState] [rapid] draw op: "insert"
+# 2026/09/18 22:39:58.273130 [TestBook_Determinism_SameOpsProduceSameState] [rapid] draw side: 0
+# 2026/09/18 22:39:58.273135 [TestBook_Determinism_SameOpsProduceSameState] [rapid] draw price: 10
+# 2026/09/18 22:39:58.273142 [TestBook_Determinism_SameOpsProduceSameState] [rapid] draw qty: 1
+# 2026/09/18 22:39:58.273148 [TestBook_Determinism_SameOpsProduceSameState] [rapid] draw op: "reduce"
+# 2026/09/18 22:39:58.273157 [TestBook_Determinism_SameOpsProduceSameState] [rapid] draw reducePick: 0
+# 2026/09/18 22:39:58.273165 [TestBook_Determinism_SameOpsProduceSameState] [rapid] draw by: 3
+# 
+v0.4.8#15200724650860302825
+0x0
+0x38e38e38e38e4
+0x3
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x38e38e38e38e4
+0x3
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x38e38e38e38e4
+0x3
+0x0
+0x0
+0x0
+0x0
+0x38e38e38e38e4
+0x2
