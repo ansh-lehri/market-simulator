@@ -57,6 +57,7 @@ type FundedOrder struct {
     // (best_ask×qty + slippage buffer). The funded-cap walk caps against THIS.
     // 0 when not applicable (sells, limits).
     MaxSpend     Ticks
+    STP         STPMode // zero value = CancelIncoming
 }
 
 No stop order types. Stop-market and stop-limit orders are held, monitored, and triggered entirely on the broker side (like the funding check — see architecture §1). The broker watches the exchange's public last-price tape and, when a stop's trigger crosses, submits the resulting order as an ordinary funded Market or Limit order through the normal inbound channel. The exchange therefore never sees a stop, has no trigger field, and has no dormant-order storage. To the exchange a triggered stop is indistinguishable from any other market/limit order.
@@ -70,6 +71,7 @@ Only orders that rest live in the book. Market, IOC, and FOK orders either fill 
 go
 type RestingOrder struct {
     OrderID     OrderID
+    BrokerID     BrokerID
     Participant ParticipantID
     Side        Side
     Price       Ticks   // the resting (maker) price
