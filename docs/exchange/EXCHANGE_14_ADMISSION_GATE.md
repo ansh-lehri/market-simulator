@@ -22,16 +22,20 @@ const (
     OutcomeMatched  Outcome = iota // passed all stages, went to the continuous matcher
     OutcomeDiverted                // passed all stages, collected into the auction batch
     OutcomeRejected                // failed a stage; never entered the book or the auction
+    OutcomeCancelled                     // a cancel succeeded
+	OutcomeCancelRejected                // a cancel found nothing to remove
+	OutcomeMakerFill                // a RESTING order of yours was hit by a taker
 )
 
 type EngineResult struct {
     Outcome Outcome
     OrderID OrderID // echoed on EVERY outcome — the broker needs it to reconcile / release
-
+    BrokerID     BrokerID
     Match     *MatchResult // non-nil iff Outcome == OutcomeMatched (from 1.2)
     Rejection *Rejection   // non-nil iff Outcome == OutcomeRejected
     // OutcomeDiverted carries no extra payload: the order now sits in the auction
     // batch; its fills arrive later when the auction clears (1.3).
+    CancelledQty Qty
 }
 
 OrderID sits at the top level (not only inside the payloads) so every outcome — including a diverted order — echoes it back. A rejected order's echo lets the broker release the reservation it made; a diverted order's echo tells the broker "accepted, pending auction."
