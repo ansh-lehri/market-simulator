@@ -203,15 +203,20 @@ The choice is a benchmark away and costs nothing to change later; the interface 
 
 6. Book operations — the surface matching and admission call
 
-These four mutators are the book's whole write surface. Every one of them keeps the quote (§7) consistent as a side effect, so no caller ever has to remember to refresh it.
+These five methods are the book's whole write/read surface. `Insert`, `Cancel`, and `ReduceFront` keep the bid/ask half of the quote (§7) consistent as a side effect, so no caller ever has to remember to refresh it. `Quote` is a read; `SetLastPrice` is the matcher's write hook for the last-price half of the quote — see §7.2.
+
+Precondition failures on the writers are dev-fatal (panic), per CLAUDE.md §Errors vs panics: an admission/matcher layer that hands the book a bad value has a bug the book must surface rather than absorb. `Cancel` is the exception — a miss is a normal outcome, not a violation.
 
 go
 // Insert rests a maker order (only reached for GTC-limit with qty left after matching).
+// Precondition (panic on violation): order != nil, order.OrderID non-empty, order.Remaining > 0,
+// order.Price > 0, order.OrderID not already in the index. Validated fully before the first
+// state write — on any panic, state is untouched.
 // - asks/bids.Insert(price) to get-or-create the level
 // - append the *RestingOrder at the back of level.Orders (newest time priority)
 // - level.TotalQty += order.Remaining
 // - index[order.OrderID] = {side, level, node}
-// - if this changed the top of its side, recompute that side of the quote
+// - refresh that side of the quote (reads side.Best())
 func (b *Book) Insert(o *RestingOrder)
 
 // Cancel removes an order by id. O(1) via the index (§5.2).
@@ -220,20 +225,29 @@ func (b *Book) Insert(o *RestingOrder)
 // - locate via index; unlink node; level.TotalQty -= o.Remaining
 // - RemoveLevel if the level is now empty
 // - delete index entry
-// - if the top changed, recompute that side of the quote
+// - refresh that side of the quote
 func (b *Book) Cancel(id OrderID) (*RestingOrder, bool)
 
 // ReduceFront applies a fill that consumed `by` units from the front order of a level.
 // Called by the matching core as it walks a level.
+// Precondition (panic on violation): level != nil, level non-empty (has a front),
+// by > 0, by <= front.Remaining. The affected side is derived from the front order's Side.
 // - front.Remaining -= by ; level.TotalQty -= by
 // - if front.Remaining == 0: remove the front node, delete its index entry,
 //   RemoveLevel if the level emptied
-// - if the top changed, recompute that side of the quote
-// (last price is written by the matching core on the fill, not here — §7.2)
+// - refresh that side of the quote
+// (last price is written by SetLastPrice, not here — §7.2)
 func (b *Book) ReduceFront(level *PriceLevel, by Qty)
 
 // Quote returns the current derived state. O(1) — reads the maintained projection.
+// Returns QuoteState by value so callers cannot hold a live pointer into book state.
 func (b *Book) Quote() QuoteState
+
+// SetLastPrice is the matcher's write hook for LastPrice / HasLastPrice — the
+// only path that mutates that half of the quote. Called by the matching core
+// on each trade print (§7.2). Precondition (panic on violation): price > 0.
+// Bid/ask fields are untouched.
+func (b *Book) SetLastPrice(price Ticks)
 
 A modify is handled by the admission/matching layer as cancel-then-reinsert (a price or size-up change loses time priority — standard exchange behaviour); the book itself needs no separate modify primitive, only Cancel + Insert.
 
@@ -261,8 +275,8 @@ This directly serves the liquidity pre-check (architecture §1.3): a market orde
 
 The quote's two halves update at different times and from different code:
 
-Bid/ask (top of book) updates on any top-of-book change — an order placed, cancelled, or filled at the current best. This is frequent. It is recomputed by the book mutators in §6 (Insert, Cancel, ReduceFront) whenever they change the top of a side: read side.Best(), copy its Price and TotalQty into the quote (or clear Has* if the side emptied).
-Last price updates only on a fill — it is the price of the most recent trade. It is written by the matching core (1.2) at the moment a trade prints, not by the book mutators. HasLastPrice becomes true on the first-ever trade and stays true. Price is emergent here in the strict sense: last price is a by-product of matching, never computed or set from outside.
+Bid/ask (top of book) updates on any top-of-book change — an order placed, cancelled, or filled at the current best. This is frequent. It is recomputed by the book mutators in §6 (Insert, Cancel, ReduceFront) after any mutation on a side: read side.Best(), copy its Price and TotalQty into the quote (or clear Has* if the side emptied). No book path writes LastPrice.
+Last price updates only on a fill — it is the price of the most recent trade. It is written by the matching core (1.2) at the moment a trade prints, via `Book.SetLastPrice(Ticks)` — the sole method that mutates LastPrice / HasLastPrice. No other mutator touches those fields. HasLastPrice becomes true on the first-ever trade and stays true thereafter. Price is emergent in the strict sense: last price is a by-product of matching, never computed or set from outside.
 
 Keeping these two triggers separate matters: recomputing bid/ask does not touch last price, and a fill updates both (the trade prints last price; consuming the maker changes the top, refreshing bid/ask).
 
