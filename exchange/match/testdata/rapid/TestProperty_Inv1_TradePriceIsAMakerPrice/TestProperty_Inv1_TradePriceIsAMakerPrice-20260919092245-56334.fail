@@ -1,0 +1,24 @@
+# 2026/09/19 09:22:45.065062 [TestProperty_Inv1_TradePriceIsAMakerPrice] [rapid] draw takerBuy: false
+# 2026/09/19 09:22:45.065094 [TestProperty_Inv1_TradePriceIsAMakerPrice] [rapid] draw makerCount: 1
+# 2026/09/19 09:22:45.065107 [TestProperty_Inv1_TradePriceIsAMakerPrice] [rapid] draw price[0]: 10000
+# 2026/09/19 09:22:45.065119 [TestProperty_Inv1_TradePriceIsAMakerPrice] [rapid] draw qty[0]: 2
+# 2026/09/19 09:22:45.065133 [TestProperty_Inv1_TradePriceIsAMakerPrice] [rapid] draw takerLimit: 9900
+# 2026/09/19 09:22:45.065145 [TestProperty_Inv1_TradePriceIsAMakerPrice] [rapid] draw takerQty: 1
+# 
+v0.4.8#10414315020456401954
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x1
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
