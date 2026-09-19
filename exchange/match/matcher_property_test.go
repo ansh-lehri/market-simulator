@@ -278,3 +278,100 @@ func TestProperty_Inv3_MarketBuyRespectsMaxSpend(t *testing.T) {
 		}
 	})
 }
+
+// drawSTPMode picks one of the three STP modes uniformly.
+func drawSTPMode(t *rapid.T) contract.STPMode {
+	choice := rapid.IntRange(0, 2).Draw(t, "stpMode")
+	switch choice {
+	case 0:
+		return contract.CancelIncoming
+	case 1:
+		return contract.CancelResting
+	default:
+		return contract.CancelBoth
+	}
+}
+
+// Invariant 4 (EXCHANGE_12 §12): a self-match never prints a trade under
+// any STP mode. Exercised across BOTH taker sides, BOTH order types
+// (Limit/Market), and ALL THREE STP modes. Half the seeded makers share
+// the taker's ParticipantID so the self-match path is actually hit — a
+// property test that doesn't reach the branch it claims to test is a
+// worthless test.
+func TestProperty_Inv4_NoSelfMatchTradesUnderAnySTP(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		takerSide := drawTakerSide(t)
+		makerSide := oppositeSide(takerSide)
+		stpMode := drawSTPMode(t)
+		takerIsMarket := rapid.Bool().Draw(t, "takerIsMarket")
+
+		const takerParticipant contract.ParticipantID = "P_T"
+		orderBook := book.NewBook("ACME")
+		matcher := NewMatcher(orderBook, allowAllClamp{}, &monotonicSeq{})
+
+		makerCount := rapid.IntRange(1, 6).Draw(t, "makerCount")
+		for makerIndex := 0; makerIndex < makerCount; makerIndex++ {
+			shareParticipant := rapid.Bool().Draw(t, fmt.Sprintf("shareParticipant[%d]", makerIndex))
+			participant := contract.ParticipantID(fmt.Sprintf("P_M%d", makerIndex))
+			if shareParticipant {
+				participant = takerParticipant
+			}
+			price := contract.Ticks(rapid.Int64Range(10000, 10050).Draw(t, fmt.Sprintf("price[%d]", makerIndex)))
+			qty := contract.Qty(rapid.Int64Range(1, 20).Draw(t, fmt.Sprintf("qty[%d]", makerIndex)))
+			orderBook.Insert(&contract.RestingOrder{
+				OrderID:     contract.OrderID(fmt.Sprintf("M%d", makerIndex)),
+				Participant: participant,
+				BrokerID:    "B_M",
+				Side:        makerSide,
+				Price:       price,
+				Remaining:   qty,
+				Seq:         contract.Seq(makerIndex + 1),
+			})
+		}
+
+		takerQty := contract.Qty(rapid.Int64Range(1, 200).Draw(t, "takerQty"))
+		order := &contract.FundedOrder{
+			OrderID:     "T",
+			Participant: takerParticipant,
+			Instrument:  "ACME",
+			Side:        takerSide,
+			TIF:         contract.IOC,
+			Qty:         takerQty,
+			STP:         stpMode,
+		}
+		if takerIsMarket {
+			order.Type = contract.Market
+			// Only Market BUY reads MaxSpend; use a large cap so funded-
+			// cap doesn't hide the self-match code path.
+			order.MaxSpend = 5_000_000
+		} else {
+			order.Type = contract.Limit
+			order.TIF = contract.GTC
+			order.LimitPrice = contract.Ticks(rapid.Int64Range(9900, 10100).Draw(t, "takerLimit"))
+		}
+
+		result := matcher.Match(order, "B_T", 999)
+
+		for tradeIndex, trade := range result.Trades {
+			if trade.TakerParticipant == trade.MakerParticipant {
+				t.Fatalf("takerSide=%v STP=%v market=%v trade[%d] is a self-match: taker=%q maker=%q (all trades=%+v)",
+					takerSide, stpMode, takerIsMarket, tradeIndex,
+					trade.TakerParticipant, trade.MakerParticipant, result.Trades)
+			}
+		}
+
+		// Extra checks for the SelfMatch-cancellation modes: when the walk
+		// halted on a self-cross, the incoming must be cancelled and never
+		// rested — even for a GTC-limit. EXCHANGE_12 §7.
+		if result.CancelReason == contract.ReasonSelfMatch {
+			if result.Rested != nil {
+				t.Fatalf("STP=%v cancelled with SelfMatch but Rested is set: %+v",
+					stpMode, result.Rested)
+			}
+			if stpMode == contract.CancelResting {
+				t.Fatalf("STP=CancelResting must never end with ReasonSelfMatch (it pulls makers and continues); got trades=%+v cancelled=%d",
+					result.Trades, result.CancelledQty)
+			}
+		}
+	})
+}
