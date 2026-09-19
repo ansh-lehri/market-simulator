@@ -24,10 +24,20 @@ func priceAcceptable(makerPrice contract.Ticks, order *contract.FundedOrder) boo
 	return makerPrice >= order.LimitPrice
 }
 
+// isMarketBuy reports whether the funded-cap rule applies to this order.
+// Only Market BUY orders carry a MaxSpend reservation; Sell markets and any
+// limit are exempt. EXCHANGE_12 §6 (e)/(h).
+func isMarketBuy(order *contract.FundedOrder) bool {
+	return order.Type == contract.Market && order.Side == contract.Buy
+}
+
 // runWalk drives the continuous-matching loop for one taker: on each
 // iteration it reads the opposite side's best level, prints one trade at the
-// maker's price, and asks the book to execute the fill. Returns the fills,
-// the unfilled remainder, and any reason set during the walk. EXCHANGE_12 §6.
+// maker's price, and asks the book to execute the fill. For Market BUY it
+// also enforces the funded-cap: fillQty is capped by (MaxSpend-spent)/price
+// (integer floor) at step (e), and the walk halts post-fill once spent has
+// reached MaxSpend at step (h). Returns fills, unfilled remainder, and any
+// reason set during the walk. EXCHANGE_12 §6.
 func (matcher *Matcher) runWalk(order *contract.FundedOrder) (
 	trades []contract.Trade,
 	remaining contract.Qty,
@@ -36,6 +46,7 @@ func (matcher *Matcher) runWalk(order *contract.FundedOrder) (
 	remaining = order.Qty
 	walkReason = contract.ReasonNone
 	opposite := oppositeSide(order.Side)
+	spent := contract.Ticks(0)
 
 	for remaining > 0 {
 		bestLevel, hasLevel := matcher.book.Best(opposite)
@@ -53,6 +64,20 @@ func (matcher *Matcher) runWalk(order *contract.FundedOrder) (
 			fillQty = frontOrder.Remaining
 		}
 
+		if isMarketBuy(order) {
+			// (e) integer-floor affordability. Any residual cash below the
+			// price of one unit at this level is unspendable — correct
+			// behaviour, not a bug. EXCHANGE_12 §6 (e), §8.3.
+			affordableQty := (order.MaxSpend - spent) / bestLevel.Price
+			if affordableQty < fillQty {
+				fillQty = affordableQty
+			}
+			if fillQty <= 0 {
+				walkReason = contract.ReasonFundedCap
+				break
+			}
+		}
+
 		trades = append(trades, contract.Trade{
 			Seq:              matcher.seq.Next(),
 			Instrument:       order.Instrument,
@@ -67,6 +92,14 @@ func (matcher *Matcher) runWalk(order *contract.FundedOrder) (
 
 		matcher.book.ReduceFront(bestLevel, fillQty)
 		remaining -= fillQty
+		spent += bestLevel.Price * fillQty
+
+		if isMarketBuy(order) && spent >= order.MaxSpend && remaining > 0 {
+			// (h) reservation exhausted after this fill; unfilled remainder
+			// cancels with FundedCap. EXCHANGE_12 §6 (h).
+			walkReason = contract.ReasonFundedCap
+			break
+		}
 	}
 	return trades, remaining, walkReason
 }
