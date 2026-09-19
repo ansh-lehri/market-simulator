@@ -1,13 +1,20 @@
 package gate
 
-import "simulator/contract"
+import (
+	"simulator/contract"
+	"simulator/exchange/clock"
+)
 
-// stubPhase implements SessionPhase with a settable current phase.
+// stubPhase implements clock.SessionPhase with a settable current phase.
+// Consumers stub the interface here rather than constructing a real
+// *clock.SessionClock because clock's checkTransition is unexported —
+// there is no way to make a real clock report anything but PhaseClosed
+// from outside its package.
 type stubPhase struct {
-	phase Phase
+	phase clock.Phase
 }
 
-func (stub *stubPhase) Current() Phase { return stub.phase }
+func (stub *stubPhase) Current() clock.Phase { return stub.phase }
 
 // auctionAddCall records the arguments of a single AuctionBatch.Add call so
 // routing tests can assert the exact triple that reached the auction batch.
