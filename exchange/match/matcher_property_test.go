@@ -203,3 +203,78 @@ func TestProperty_Inv6_LastPriceMatchesFinalTrade(t *testing.T) {
 		}
 	})
 }
+
+// Invariant 3 (EXCHANGE_12 §12): no negative or zero fills; no over-fill of
+// the taker's Qty; for a Market BUY, total spend never exceeds MaxSpend.
+// Exercised for BOTH taker sides — funded-cap only applies to Buy, but the
+// over-fill and positive-qty portions hold for Sell too.
+func TestProperty_Inv3_MarketBuyRespectsMaxSpend(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		takerSide := drawTakerSide(t)
+		matcher, _, _ := seedRandomMakers(t, oppositeSide(takerSide))
+
+		// Range spans MaxSpend values that always bite, sometimes bite, and
+		// never bite for the seed sizes (up to 6 makers × 20 qty × 10050).
+		maxSpend := contract.Ticks(rapid.Int64Range(0, 2_000_000).Draw(t, "maxSpend"))
+		takerQty := contract.Qty(rapid.Int64Range(1, 200).Draw(t, "takerQty"))
+
+		order := &contract.FundedOrder{
+			OrderID:     "T",
+			Participant: "P_T",
+			Instrument:  "ACME",
+			Side:        takerSide,
+			Type:        contract.Market,
+			TIF:         contract.IOC,
+			Qty:         takerQty,
+			MaxSpend:    maxSpend,
+		}
+		result := matcher.Match(order, "B_T", 999)
+
+		var totalQty contract.Qty
+		var totalSpend contract.Ticks
+		for tradeIndex, trade := range result.Trades {
+			if trade.Qty <= 0 {
+				t.Fatalf("takerSide=%v trade[%d].Qty=%d, want > 0",
+					takerSide, tradeIndex, trade.Qty)
+			}
+			totalQty += trade.Qty
+			totalSpend += trade.Price * trade.Qty
+		}
+
+		if totalQty > order.Qty {
+			t.Fatalf("takerSide=%v over-fill: totalQty=%d, order.Qty=%d",
+				takerSide, totalQty, order.Qty)
+		}
+		if totalQty+result.CancelledQty != order.Qty {
+			t.Fatalf("takerSide=%v qty accounting: totalQty=%d + CancelledQty=%d != order.Qty=%d",
+				takerSide, totalQty, result.CancelledQty, order.Qty)
+		}
+		if result.Rested != nil {
+			t.Fatalf("takerSide=%v Market must never rest, got Rested=%+v", takerSide, result.Rested)
+		}
+
+		if takerSide == contract.Buy {
+			if totalSpend > order.MaxSpend {
+				t.Fatalf("Buy market over-spent: totalSpend=%d, MaxSpend=%d, trades=%+v",
+					totalSpend, order.MaxSpend, result.Trades)
+			}
+			// If any qty was cancelled with FundedCap, spending must be at
+			// or above (MaxSpend - one unit at the halted level's price) —
+			// i.e., the walk didn't stop early. We cannot know the halted
+			// price without replaying, so bound with the simpler statement:
+			// spent ≤ MaxSpend, tested above.
+			if result.CancelledQty > 0 && result.CancelReason != contract.ReasonFundedCap &&
+				result.CancelReason != contract.ReasonNoLiquidity {
+				t.Fatalf("Buy market cancelled with unexpected reason %v (trades=%+v cancelled=%d)",
+					result.CancelReason, result.Trades, result.CancelledQty)
+			}
+		} else {
+			// Sell market cannot trigger funded-cap; if anything cancels,
+			// the reason must be NoLiquidity (opposite bid side emptied).
+			if result.CancelledQty > 0 && result.CancelReason != contract.ReasonNoLiquidity {
+				t.Fatalf("Sell market cancelled with unexpected reason %v (trades=%+v cancelled=%d)",
+					result.CancelReason, result.Trades, result.CancelledQty)
+			}
+		}
+	})
+}
