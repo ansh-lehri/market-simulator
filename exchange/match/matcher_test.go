@@ -1,6 +1,7 @@
 package match
 
 import (
+	"reflect"
 	"testing"
 
 	"simulator/contract"
@@ -13,6 +14,15 @@ func newTestMatcher(t *testing.T) (*Matcher, *book.Book) {
 	t.Helper()
 	orderBook := book.NewBook("ACME")
 	matcher := NewMatcher(orderBook, allowAllClamp{}, &monotonicSeq{})
+	return matcher, orderBook
+}
+
+// newTestMatcherWithClamp is newTestMatcher for tests that need to exercise
+// the clamp-halt path in the walk.
+func newTestMatcherWithClamp(t *testing.T, clamp CircuitClamp) (*Matcher, *book.Book) {
+	t.Helper()
+	orderBook := book.NewBook("ACME")
+	matcher := NewMatcher(orderBook, clamp, &monotonicSeq{})
 	return matcher, orderBook
 }
 
@@ -980,3 +990,282 @@ func TestMatch_G4d_SellIOCLimitLeftover(t *testing.T) {
 		t.Errorf("bid side must be empty, got %+v", quote)
 	}
 }
+
+// G8 — Buy Market clamp halt: band [9990, 10010]. First ask (10000) is in
+// band → prints 5@10000. Next ask (10015) is above the band → walk halts
+// with ReasonCircuitClamp before printing anything at that level. Market
+// remainder cancels with ClampCircuit. EXCHANGE_12 §6 (b), §7 remainder
+// table; EXCHANGE_15 §3 clamp-half.
+func TestMatch_G8_BuyMarketClampHalt(t *testing.T) {
+	matcher, orderBook := newTestMatcherWithClamp(t, bandedClamp{lower: 9990, upper: 10010})
+	orderBook.Insert(makeResting("M1", "P_M1", contract.Sell, 10000, 5, 1))
+	orderBook.Insert(makeResting("M2", "P_M2", contract.Sell, 10015, 5, 2))
+
+	order := &contract.FundedOrder{
+		OrderID:     "T",
+		Participant: "P_T",
+		Instrument:  "ACME",
+		Side:        contract.Buy,
+		Type:        contract.Market,
+		TIF:         contract.IOC,
+		Qty:         10,
+		MaxSpend:    1_000_000, // large; funded-cap must not fire before clamp
+	}
+
+	result := matcher.Match(order, "B_T", 1100)
+
+	if len(result.Trades) != 1 {
+		t.Fatalf("Trades: got %d, want 1 (only in-band level printed)", len(result.Trades))
+	}
+	assertTrade(t, 0, result.Trades[0], contract.Trade{
+		Instrument: "ACME", Price: 10000, Qty: 5,
+		TakerOrder: "T", MakerOrder: "M1", TakerSide: contract.Buy,
+		TakerParticipant: "P_T", MakerParticipant: "P_M1",
+	})
+	if result.Rested != nil {
+		t.Errorf("Rested: got %+v, want nil (market never rests)", result.Rested)
+	}
+	if result.CancelledQty != 5 {
+		t.Errorf("CancelledQty: got %d, want 5", result.CancelledQty)
+	}
+	if result.CancelReason != contract.ReasonCircuitClamp {
+		t.Errorf("CancelReason: got %v, want ReasonCircuitClamp", result.CancelReason)
+	}
+	if !result.LastPriceMoved || result.LastPrice != 10000 {
+		t.Errorf("LastPrice: got (%d, moved=%v), want (10000, true)", result.LastPrice, result.LastPriceMoved)
+	}
+
+	// M2 must still be untouched at 10015×5 (the walk halted BEFORE any
+	// print at that level).
+	quote := orderBook.Quote()
+	if !quote.HasAsk || quote.BestAsk != 10015 || quote.AskQty != 5 {
+		t.Errorf("M2 must be intact: got (has=%v price=%d qty=%d), want (true, 10015, 5)",
+			quote.HasAsk, quote.BestAsk, quote.AskQty)
+	}
+}
+
+// G8b — Buy GTC-Limit clamp halt rests at LimitPrice: band [9990, 10010].
+// Limit@10020 (band-outside limit; assume admission let it through — the
+// test targets the clamp-half specifically). Prints 5@10000, halts on the
+// 10015 level. GTC-limit remainder rests at LimitPrice=10020 — even though
+// that price is outside the band, per EXCHANGE_15 §4 ("resting interest
+// sitting exactly at the circuit … correct behaviour, not a defect").
+func TestMatch_G8b_BuyLimitClampHalt_RestsAtLimitPrice(t *testing.T) {
+	matcher, orderBook := newTestMatcherWithClamp(t, bandedClamp{lower: 9990, upper: 10010})
+	orderBook.Insert(makeResting("M1", "P_M1", contract.Sell, 10000, 5, 1))
+	orderBook.Insert(makeResting("M2", "P_M2", contract.Sell, 10015, 5, 2))
+
+	order := &contract.FundedOrder{
+		OrderID:     "T",
+		Participant: "P_T",
+		Instrument:  "ACME",
+		Side:        contract.Buy,
+		Type:        contract.Limit,
+		TIF:         contract.GTC,
+		Qty:         10,
+		LimitPrice:  10020,
+	}
+
+	result := matcher.Match(order, "B_T", 1101)
+
+	if len(result.Trades) != 1 {
+		t.Fatalf("Trades: got %d, want 1", len(result.Trades))
+	}
+	assertTrade(t, 0, result.Trades[0], contract.Trade{
+		Instrument: "ACME", Price: 10000, Qty: 5,
+		TakerOrder: "T", MakerOrder: "M1", TakerSide: contract.Buy,
+		TakerParticipant: "P_T", MakerParticipant: "P_M1",
+	})
+	if result.Rested == nil {
+		t.Fatal("Rested: got nil, want non-nil (GTC-limit rests at LimitPrice even on clamp halt)")
+	}
+	if result.Rested.Price != 10020 || result.Rested.Remaining != 5 {
+		t.Errorf("Rested: got price=%d rem=%d, want price=10020 rem=5",
+			result.Rested.Price, result.Rested.Remaining)
+	}
+	if result.CancelledQty != 0 {
+		t.Errorf("CancelledQty: got %d, want 0 (GTC rests instead of cancelling)", result.CancelledQty)
+	}
+	if !result.LastPriceMoved || result.LastPrice != 10000 {
+		t.Errorf("LastPrice: got (%d, moved=%v), want (10000, true)", result.LastPrice, result.LastPriceMoved)
+	}
+
+	// M1 fully consumed, M2 untouched, new bid at 10020 outside the band.
+	quote := orderBook.Quote()
+	if !quote.HasAsk || quote.BestAsk != 10015 || quote.AskQty != 5 {
+		t.Errorf("M2 must be intact: got (has=%v price=%d qty=%d), want (true, 10015, 5)",
+			quote.HasAsk, quote.BestAsk, quote.AskQty)
+	}
+	if !quote.HasBid || quote.BestBid != 10020 || quote.BidQty != 5 {
+		t.Errorf("resting bid at LimitPrice: got (has=%v price=%d qty=%d), want (true, 10020, 5)",
+			quote.HasBid, quote.BestBid, quote.BidQty)
+	}
+}
+
+// G8c — Sell Market clamp halt (symmetry direction): band [9990, 10010].
+// Best bid 10005 is in band → prints 5@10005. Next bid 9985 is below band
+// → halts with ReasonCircuitClamp. Confirms the clamp check is invoked
+// symmetrically on the bid side of the walk.
+func TestMatch_G8c_SellMarketClampHalt(t *testing.T) {
+	matcher, orderBook := newTestMatcherWithClamp(t, bandedClamp{lower: 9990, upper: 10010})
+	orderBook.Insert(makeResting("M1", "P_M1", contract.Buy, 10005, 5, 1))
+	orderBook.Insert(makeResting("M2", "P_M2", contract.Buy, 9985, 5, 2))
+
+	order := &contract.FundedOrder{
+		OrderID:     "T",
+		Participant: "P_T",
+		Instrument:  "ACME",
+		Side:        contract.Sell,
+		Type:        contract.Market,
+		TIF:         contract.IOC,
+		Qty:         10,
+	}
+
+	result := matcher.Match(order, "B_T", 1102)
+
+	if len(result.Trades) != 1 {
+		t.Fatalf("Trades: got %d, want 1", len(result.Trades))
+	}
+	assertTrade(t, 0, result.Trades[0], contract.Trade{
+		Instrument: "ACME", Price: 10005, Qty: 5,
+		TakerOrder: "T", MakerOrder: "M1", TakerSide: contract.Sell,
+		TakerParticipant: "P_T", MakerParticipant: "P_M1",
+	})
+	if result.Rested != nil {
+		t.Errorf("Rested: got %+v, want nil", result.Rested)
+	}
+	if result.CancelledQty != 5 {
+		t.Errorf("CancelledQty: got %d, want 5", result.CancelledQty)
+	}
+	if result.CancelReason != contract.ReasonCircuitClamp {
+		t.Errorf("CancelReason: got %v, want ReasonCircuitClamp", result.CancelReason)
+	}
+	if !result.LastPriceMoved || result.LastPrice != 10005 {
+		t.Errorf("LastPrice: got (%d, moved=%v), want (10005, true)", result.LastPrice, result.LastPriceMoved)
+	}
+
+	quote := orderBook.Quote()
+	if !quote.HasBid || quote.BestBid != 9985 || quote.BidQty != 5 {
+		t.Errorf("M2 must be intact: got (has=%v price=%d qty=%d), want (true, 9985, 5)",
+			quote.HasBid, quote.BestBid, quote.BidQty)
+	}
+}
+
+// G8d — IOC-Limit clamp precedence: an IOC-Limit that halts on the clamp
+// carries ReasonCircuitClamp, NOT ReasonIOCLeftover. Locks in that walk-set
+// reasons win over the TIF default (mirrors G4c for the clamp path).
+func TestMatch_G8d_IOCLimitClampReasonWinsOverIOCLeftover(t *testing.T) {
+	matcher, orderBook := newTestMatcherWithClamp(t, bandedClamp{lower: 9990, upper: 10010})
+	orderBook.Insert(makeResting("M1", "P_M1", contract.Sell, 10000, 5, 1))
+	orderBook.Insert(makeResting("M2", "P_M2", contract.Sell, 10015, 5, 2))
+
+	order := &contract.FundedOrder{
+		OrderID:     "T",
+		Participant: "P_T",
+		Instrument:  "ACME",
+		Side:        contract.Buy,
+		Type:        contract.Limit,
+		TIF:         contract.IOC,
+		Qty:         10,
+		LimitPrice:  10020,
+	}
+
+	result := matcher.Match(order, "B_T", 1103)
+
+	if len(result.Trades) != 1 {
+		t.Fatalf("Trades: got %d, want 1", len(result.Trades))
+	}
+	if result.Rested != nil {
+		t.Errorf("Rested: got %+v, want nil (IOC never rests)", result.Rested)
+	}
+	if result.CancelledQty != 5 {
+		t.Errorf("CancelledQty: got %d, want 5", result.CancelledQty)
+	}
+	if result.CancelReason != contract.ReasonCircuitClamp {
+		t.Errorf("CancelReason: got %v, want ReasonCircuitClamp (must NOT be IOCLeftover)",
+			result.CancelReason)
+	}
+	if !result.LastPriceMoved || result.LastPrice != 10000 {
+		t.Errorf("LastPrice: got (%d, moved=%v), want (10000, true)", result.LastPrice, result.LastPriceMoved)
+	}
+}
+
+// Inv 7 (EXCHANGE_12 §12): the matcher makes zero calls across the money
+// seam. Structurally enforced here by asserting the Matcher struct has
+// exactly the three allowlisted fields (book, clamp, seq) — adding a
+// money/account reference to Matcher requires updating this test, which
+// is the point.
+func TestMatcher_Inv7_HoldsNoMoneyReference(t *testing.T) {
+	allowed := map[string]bool{"book": true, "clamp": true, "seq": true}
+
+	matcherType := reflect.TypeOf(Matcher{})
+	if got := matcherType.NumField(); got != len(allowed) {
+		t.Fatalf("Matcher has %d fields, want %d (allowlist=%v)", got, len(allowed), allowed)
+	}
+	for fieldIndex := 0; fieldIndex < matcherType.NumField(); fieldIndex++ {
+		field := matcherType.Field(fieldIndex)
+		if !allowed[field.Name] {
+			t.Errorf("Matcher has unexpected field %q of type %v — inv 7 forbids money/account references; if a new collaborator is truly needed, add it to the allowlist explicitly",
+				field.Name, field.Type)
+		}
+	}
+}
+
+// Determinism (EXCHANGE_11 §concurrency, testing policy in root CLAUDE.md):
+// two independent runs of the same scenario against fresh books must
+// produce byte-equal MatchResult and Quote. Guards against any hidden
+// nondeterminism (map iteration, uninitialised state, race-driven order).
+func TestMatch_Determinism_G2Scenario(t *testing.T) {
+	runG2 := func() (contract.MatchResult, QuoteSnapshot) {
+		matcher, orderBook := newTestMatcher(t)
+		orderBook.Insert(makeResting("M1", "P_M1", contract.Sell, 10023, 30, 1))
+		orderBook.Insert(makeResting("M2", "P_M2", contract.Sell, 10024, 20, 2))
+		orderBook.Insert(makeResting("M3", "P_M3", contract.Sell, 10026, 50, 3))
+		order := &contract.FundedOrder{
+			OrderID: "T", Participant: "P_T", Instrument: "ACME",
+			Side: contract.Buy, Type: contract.Limit, TIF: contract.GTC,
+			Qty: 60, LimitPrice: 10025,
+		}
+		result := matcher.Match(order, "B_T", 200)
+		return result, snapshotQuote(orderBook.Quote())
+	}
+	result1, quote1 := runG2()
+	result2, quote2 := runG2()
+
+	if !reflect.DeepEqual(result1, result2) {
+		t.Fatalf("determinism (G2): MatchResult differs between runs.\nrun1: %+v\nrun2: %+v", result1, result2)
+	}
+	if quote1 != quote2 {
+		t.Fatalf("determinism (G2): Quote differs between runs.\nrun1: %+v\nrun2: %+v", quote1, quote2)
+	}
+}
+
+func TestMatch_Determinism_G3Scenario(t *testing.T) {
+	runG3 := func() (contract.MatchResult, QuoteSnapshot) {
+		matcher, orderBook := newTestMatcher(t)
+		orderBook.Insert(makeResting("M1", "P_M1", contract.Sell, 10000, 3, 1))
+		orderBook.Insert(makeResting("M2", "P_M2", contract.Sell, 10025, 2, 2))
+		order := &contract.FundedOrder{
+			OrderID: "T", Participant: "P_T", Instrument: "ACME",
+			Side: contract.Buy, Type: contract.Market, TIF: contract.IOC,
+			Qty: 5, MaxSpend: 25000,
+		}
+		result := matcher.Match(order, "B_T", 500)
+		return result, snapshotQuote(orderBook.Quote())
+	}
+	result1, quote1 := runG3()
+	result2, quote2 := runG3()
+
+	if !reflect.DeepEqual(result1, result2) {
+		t.Fatalf("determinism (G3): MatchResult differs between runs.\nrun1: %+v\nrun2: %+v", result1, result2)
+	}
+	if quote1 != quote2 {
+		t.Fatalf("determinism (G3): Quote differs between runs.\nrun1: %+v\nrun2: %+v", quote1, quote2)
+	}
+}
+
+// QuoteSnapshot is a value-copy of book.QuoteState used for byte-equality
+// in the determinism tests.
+type QuoteSnapshot = book.QuoteState
+
+func snapshotQuote(quote book.QuoteState) QuoteSnapshot { return quote }
