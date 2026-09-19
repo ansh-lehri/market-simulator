@@ -793,3 +793,190 @@ func TestMatch_G3d_MarketSell_FullFill(t *testing.T) {
 		t.Errorf("LastPrice: got (%d, moved=%v), want (10005, true)", result.LastPrice, result.LastPriceMoved)
 	}
 }
+
+// G4 — IOC-Limit partial then cancel: Buy IOC Limit @10000 qty 10 against
+// Ask 10000×5. Consumes the level (5@10000), remainder 5 cancels with
+// ReasonIOCLeftover — IOC never rests (EXCHANGE_12 §7 remainder table).
+func TestMatch_G4_IOCLimitLeftover(t *testing.T) {
+	matcher, orderBook := newTestMatcher(t)
+	orderBook.Insert(makeResting("M1", "P_M", contract.Sell, 10000, 5, 1))
+
+	order := &contract.FundedOrder{
+		OrderID:     "T",
+		Participant: "P_T",
+		Instrument:  "ACME",
+		Side:        contract.Buy,
+		Type:        contract.Limit,
+		TIF:         contract.IOC,
+		Qty:         10,
+		LimitPrice:  10000,
+	}
+
+	result := matcher.Match(order, "B_T", 1000)
+
+	if len(result.Trades) != 1 {
+		t.Fatalf("Trades: got %d, want 1", len(result.Trades))
+	}
+	assertTrade(t, 0, result.Trades[0], contract.Trade{
+		Instrument: "ACME", Price: 10000, Qty: 5,
+		TakerOrder: "T", MakerOrder: "M1", TakerSide: contract.Buy,
+		TakerParticipant: "P_T", MakerParticipant: "P_M",
+	})
+	if result.Rested != nil {
+		t.Errorf("Rested: got %+v, want nil (IOC never rests)", result.Rested)
+	}
+	if result.CancelledQty != 5 {
+		t.Errorf("CancelledQty: got %d, want 5", result.CancelledQty)
+	}
+	if result.CancelReason != contract.ReasonIOCLeftover {
+		t.Errorf("CancelReason: got %v, want ReasonIOCLeftover", result.CancelReason)
+	}
+	if !result.LastPriceMoved || result.LastPrice != 10000 {
+		t.Errorf("LastPrice: got (%d, moved=%v), want (10000, true)", result.LastPrice, result.LastPriceMoved)
+	}
+
+	// Ask side must be empty after M1 fully consumed; no bid rested.
+	quote := orderBook.Quote()
+	if quote.HasAsk {
+		t.Errorf("ask side must be empty, got %+v", quote)
+	}
+	if quote.HasBid {
+		t.Errorf("no bid should have been created, quote=%+v", quote)
+	}
+}
+
+// G4b — IOC that fully fills: no cancel, no rest, CancelReason must stay
+// ReasonNone. Regression that the IOCLeftover default doesn't get stamped
+// on orders that had no leftover.
+func TestMatch_G4b_IOCLimitFullyFills(t *testing.T) {
+	matcher, orderBook := newTestMatcher(t)
+	orderBook.Insert(makeResting("M1", "P_M", contract.Sell, 10000, 10, 1))
+
+	order := &contract.FundedOrder{
+		OrderID:     "T",
+		Participant: "P_T",
+		Instrument:  "ACME",
+		Side:        contract.Buy,
+		Type:        contract.Limit,
+		TIF:         contract.IOC,
+		Qty:         5,
+		LimitPrice:  10000,
+	}
+
+	result := matcher.Match(order, "B_T", 1001)
+
+	if len(result.Trades) != 1 {
+		t.Fatalf("Trades: got %d, want 1", len(result.Trades))
+	}
+	assertTrade(t, 0, result.Trades[0], contract.Trade{
+		Instrument: "ACME", Price: 10000, Qty: 5,
+		TakerOrder: "T", MakerOrder: "M1", TakerSide: contract.Buy,
+		TakerParticipant: "P_T", MakerParticipant: "P_M",
+	})
+	if result.Rested != nil {
+		t.Errorf("Rested: got %+v, want nil", result.Rested)
+	}
+	if result.CancelledQty != 0 {
+		t.Errorf("CancelledQty: got %d, want 0", result.CancelledQty)
+	}
+	if result.CancelReason != contract.ReasonNone {
+		t.Errorf("CancelReason: got %v, want ReasonNone (no leftover)", result.CancelReason)
+	}
+	if !result.LastPriceMoved || result.LastPrice != 10000 {
+		t.Errorf("LastPrice: got (%d, moved=%v), want (10000, true)", result.LastPrice, result.LastPriceMoved)
+	}
+
+	// M1 partially consumed (5 left) still resting.
+	quote := orderBook.Quote()
+	if !quote.HasAsk || quote.BestAsk != 10000 || quote.AskQty != 5 {
+		t.Errorf("M1 remainder: got (has=%v price=%d qty=%d), want (true, 10000, 5)",
+			quote.HasAsk, quote.BestAsk, quote.AskQty)
+	}
+}
+
+// G4c — IOC self-match: an IOC order that ends via STP CancelIncoming must
+// carry ReasonSelfMatch, not ReasonIOCLeftover. Locks in that walk-set
+// reasons win over the TIF default (assembleResult's SelfMatch branch is
+// evaluated BEFORE the market/IOC default-reason branch).
+func TestMatch_G4c_IOCSelfMatchNotOverridden(t *testing.T) {
+	matcher, orderBook := newTestMatcher(t)
+	orderBook.Insert(makeResting("M1", "P_P", contract.Sell, 10000, 10, 1))
+
+	order := &contract.FundedOrder{
+		OrderID:     "T",
+		Participant: "P_P", // shares with M1 → self-match
+		Instrument:  "ACME",
+		Side:        contract.Buy,
+		Type:        contract.Limit,
+		TIF:         contract.IOC,
+		Qty:         5,
+		LimitPrice:  10005,
+		STP:         contract.CancelIncoming,
+	}
+
+	result := matcher.Match(order, "B_T", 1002)
+
+	if len(result.Trades) != 0 {
+		t.Fatalf("Trades: got %d, want 0 (self-match never prints)", len(result.Trades))
+	}
+	if result.Rested != nil {
+		t.Errorf("Rested: got %+v, want nil", result.Rested)
+	}
+	if result.CancelledQty != 5 {
+		t.Errorf("CancelledQty: got %d, want 5", result.CancelledQty)
+	}
+	if result.CancelReason != contract.ReasonSelfMatch {
+		t.Errorf("CancelReason: got %v, want ReasonSelfMatch (must NOT be IOCLeftover)",
+			result.CancelReason)
+	}
+	if result.LastPriceMoved {
+		t.Errorf("LastPriceMoved: got true, want false")
+	}
+}
+
+// G4d — Sell IOC partial then cancel: mirrors G4 on the Sell side to prove
+// the IOCLeftover default fires symmetrically. Sell IOC Limit @10005 qty 8
+// against Bid 10005×3 → 1 trade, 5 cancelled with ReasonIOCLeftover.
+func TestMatch_G4d_SellIOCLimitLeftover(t *testing.T) {
+	matcher, orderBook := newTestMatcher(t)
+	orderBook.Insert(makeResting("M1", "P_M", contract.Buy, 10005, 3, 1))
+
+	order := &contract.FundedOrder{
+		OrderID:     "T",
+		Participant: "P_T",
+		Instrument:  "ACME",
+		Side:        contract.Sell,
+		Type:        contract.Limit,
+		TIF:         contract.IOC,
+		Qty:         8,
+		LimitPrice:  10005,
+	}
+
+	result := matcher.Match(order, "B_T", 1003)
+
+	if len(result.Trades) != 1 {
+		t.Fatalf("Trades: got %d, want 1", len(result.Trades))
+	}
+	assertTrade(t, 0, result.Trades[0], contract.Trade{
+		Instrument: "ACME", Price: 10005, Qty: 3,
+		TakerOrder: "T", MakerOrder: "M1", TakerSide: contract.Sell,
+		TakerParticipant: "P_T", MakerParticipant: "P_M",
+	})
+	if result.Rested != nil {
+		t.Errorf("Rested: got %+v, want nil (IOC never rests)", result.Rested)
+	}
+	if result.CancelledQty != 5 {
+		t.Errorf("CancelledQty: got %d, want 5", result.CancelledQty)
+	}
+	if result.CancelReason != contract.ReasonIOCLeftover {
+		t.Errorf("CancelReason: got %v, want ReasonIOCLeftover", result.CancelReason)
+	}
+	if !result.LastPriceMoved || result.LastPrice != 10005 {
+		t.Errorf("LastPrice: got (%d, moved=%v), want (10005, true)", result.LastPrice, result.LastPriceMoved)
+	}
+
+	quote := orderBook.Quote()
+	if quote.HasBid {
+		t.Errorf("bid side must be empty, got %+v", quote)
+	}
+}
