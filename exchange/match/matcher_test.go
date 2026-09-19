@@ -593,6 +593,164 @@ func TestMatch_G3c_MarketBuy_ExactFitStopsAtStepH(t *testing.T) {
 	}
 }
 
+// G5 — STP CancelIncoming: taker P_P hits an own-participant resting order.
+// The walk halts immediately with ReasonSelfMatch; no trade prints; the
+// resting maker is untouched; the GTC-limit taker does NOT rest (per
+// EXCHANGE_12 §7 final paragraph — self-match-cancelled orders never rest).
+func TestMatch_G5_STPCancelIncoming(t *testing.T) {
+	matcher, orderBook := newTestMatcher(t)
+	orderBook.Insert(makeResting("M1", "P_P", contract.Sell, 10000, 10, 1))
+
+	order := &contract.FundedOrder{
+		OrderID:     "T",
+		Participant: "P_P", // same participant as M1 → self-match
+		Instrument:  "ACME",
+		Side:        contract.Buy,
+		Type:        contract.Limit,
+		TIF:         contract.GTC,
+		Qty:         5,
+		LimitPrice:  10005,
+		STP:         contract.CancelIncoming,
+	}
+
+	result := matcher.Match(order, "B_T", 700)
+
+	if len(result.Trades) != 0 {
+		t.Fatalf("Trades: got %d, want 0 (self-match never prints)", len(result.Trades))
+	}
+	if result.Rested != nil {
+		t.Errorf("Rested: got %+v, want nil (self-match cancels the incoming)", result.Rested)
+	}
+	if result.CancelledQty != 5 {
+		t.Errorf("CancelledQty: got %d, want 5", result.CancelledQty)
+	}
+	if result.CancelReason != contract.ReasonSelfMatch {
+		t.Errorf("CancelReason: got %v, want ReasonSelfMatch", result.CancelReason)
+	}
+	if result.LastPriceMoved {
+		t.Errorf("LastPriceMoved: got true, want false")
+	}
+
+	// M1 must still be resting untouched: 10000×10 on the ask side.
+	quote := orderBook.Quote()
+	if !quote.HasAsk || quote.BestAsk != 10000 || quote.AskQty != 10 {
+		t.Errorf("resting maker: got (has=%v price=%d qty=%d), want (true, 10000, 10)",
+			quote.HasAsk, quote.BestAsk, quote.AskQty)
+	}
+	if quote.HasBid {
+		t.Errorf("no bid should have been created, quote=%+v", quote)
+	}
+}
+
+// G6 — STP CancelResting: taker P_P finds own-participant M1 at the front
+// of the best ask level; the walk pulls M1 (book.Cancel) and re-loops. It
+// then finds M2 (participant P_Q) at the next level, fills 5@10005, and
+// rests the remainder (5) at the taker's LimitPrice=10010. No self-match
+// trade ever prints.
+func TestMatch_G6_STPCancelResting(t *testing.T) {
+	matcher, orderBook := newTestMatcher(t)
+	orderBook.Insert(makeResting("M1", "P_P", contract.Sell, 10000, 3, 1))
+	orderBook.Insert(makeResting("M2", "P_Q", contract.Sell, 10005, 5, 2))
+
+	order := &contract.FundedOrder{
+		OrderID:     "T",
+		Participant: "P_P",
+		Instrument:  "ACME",
+		Side:        contract.Buy,
+		Type:        contract.Limit,
+		TIF:         contract.GTC,
+		Qty:         10,
+		LimitPrice:  10010,
+		STP:         contract.CancelResting,
+	}
+
+	result := matcher.Match(order, "B_T", 800)
+
+	if len(result.Trades) != 1 {
+		t.Fatalf("Trades: got %d, want 1", len(result.Trades))
+	}
+	assertTrade(t, 0, result.Trades[0], contract.Trade{
+		Instrument: "ACME", Price: 10005, Qty: 5,
+		TakerOrder: "T", MakerOrder: "M2", TakerSide: contract.Buy,
+		TakerParticipant: "P_P", MakerParticipant: "P_Q",
+	})
+	if result.Rested == nil {
+		t.Fatal("Rested: got nil, want non-nil (GTC-limit remainder rests)")
+	}
+	if result.Rested.Price != 10010 || result.Rested.Remaining != 5 {
+		t.Errorf("Rested: got price=%d rem=%d, want price=10010 rem=5",
+			result.Rested.Price, result.Rested.Remaining)
+	}
+	if result.CancelledQty != 0 {
+		t.Errorf("CancelledQty: got %d, want 0", result.CancelledQty)
+	}
+	if !result.LastPriceMoved || result.LastPrice != 10005 {
+		t.Errorf("LastPrice: got (%d, moved=%v), want (10005, true)", result.LastPrice, result.LastPriceMoved)
+	}
+
+	// Book after: M1 pulled (side effect of STP), M2 fully consumed, new
+	// bid at 10010 qty 5.
+	quote := orderBook.Quote()
+	if quote.HasAsk {
+		t.Errorf("ask side must be empty, got %+v", quote)
+	}
+	if !quote.HasBid || quote.BestBid != 10010 || quote.BidQty != 5 {
+		t.Errorf("bid: got (has=%v price=%d qty=%d), want (true, 10010, 5)",
+			quote.HasBid, quote.BestBid, quote.BidQty)
+	}
+}
+
+// G7 — STP CancelBoth: taker P_P hits own-participant M1; both are
+// cancelled. M1 is pulled from the book via book.Cancel (visible side
+// effect), the walk halts with ReasonSelfMatch, and the incoming does NOT
+// rest. M2 (different participant) is untouched. No trade prints.
+func TestMatch_G7_STPCancelBoth(t *testing.T) {
+	matcher, orderBook := newTestMatcher(t)
+	orderBook.Insert(makeResting("M1", "P_P", contract.Sell, 10000, 3, 1))
+	orderBook.Insert(makeResting("M2", "P_Q", contract.Sell, 10005, 5, 2))
+
+	order := &contract.FundedOrder{
+		OrderID:     "T",
+		Participant: "P_P",
+		Instrument:  "ACME",
+		Side:        contract.Buy,
+		Type:        contract.Limit,
+		TIF:         contract.GTC,
+		Qty:         10,
+		LimitPrice:  10010,
+		STP:         contract.CancelBoth,
+	}
+
+	result := matcher.Match(order, "B_T", 900)
+
+	if len(result.Trades) != 0 {
+		t.Fatalf("Trades: got %d, want 0 (self-match never prints)", len(result.Trades))
+	}
+	if result.Rested != nil {
+		t.Errorf("Rested: got %+v, want nil (self-match cancels the incoming)", result.Rested)
+	}
+	if result.CancelledQty != 10 {
+		t.Errorf("CancelledQty: got %d, want 10", result.CancelledQty)
+	}
+	if result.CancelReason != contract.ReasonSelfMatch {
+		t.Errorf("CancelReason: got %v, want ReasonSelfMatch", result.CancelReason)
+	}
+	if result.LastPriceMoved {
+		t.Errorf("LastPriceMoved: got true, want false")
+	}
+
+	// Book after: M1 pulled (side effect of CancelBoth); M2 untouched at
+	// 10005 qty 5; no new bid.
+	quote := orderBook.Quote()
+	if !quote.HasAsk || quote.BestAsk != 10005 || quote.AskQty != 5 {
+		t.Errorf("best ask should now be M2 (10005×5), got (has=%v price=%d qty=%d)",
+			quote.HasAsk, quote.BestAsk, quote.AskQty)
+	}
+	if quote.HasBid {
+		t.Errorf("no bid should have been created, quote=%+v", quote)
+	}
+}
+
 // G3d — Market SELL regression: funded-cap logic is Market-BUY-only. A Sell
 // market walks bids without any MaxSpend check and fully fills against a
 // resting bid. Guards against a hypothetical bug where the affordability
