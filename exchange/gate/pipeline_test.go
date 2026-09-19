@@ -6,6 +6,7 @@ import (
 
 	"simulator/contract"
 	"simulator/exchange/book"
+	"simulator/exchange/clock"
 	"simulator/exchange/match"
 )
 
@@ -18,7 +19,7 @@ import (
 // override these when they want to force a specific rejection.
 func newPipelineCtx(
 	t *testing.T,
-	phase Phase,
+	phase clock.Phase,
 	tickSize contract.Ticks,
 	bandLower, bandUpper contract.Ticks,
 	orderBook *book.Book,
@@ -46,7 +47,7 @@ func TestRunPipeline_ContinuousRoutesToMatcher(t *testing.T) {
 	// and reaches the matcher — proved by the book holding a resting bid
 	// afterward and the auction stub seeing zero calls.
 	ctx, auction, admitSeq := newPipelineCtx(
-		t, PhaseContinuous, 1, 0, 1_000_000, book.NewBook("ACME"),
+		t, clock.PhaseContinuous, 1, 0, 1_000_000, book.NewBook("ACME"),
 	)
 
 	got := RunPipeline(validLimitOrder(), testBroker, ctx)
@@ -75,7 +76,7 @@ func TestRunPipeline_ClosingAuctionRoutesToAuctionBatch(t *testing.T) {
 	// Same order in PhaseClosingAuction diverts: auction receives one Add,
 	// matcher never runs (book untouched), diverted outcome carries no Match.
 	ctx, auction, admitSeq := newPipelineCtx(
-		t, PhaseClosingAuction, 1, 0, 1_000_000, book.NewBook("ACME"),
+		t, clock.PhaseClosingAuction, 1, 0, 1_000_000, book.NewBook("ACME"),
 	)
 
 	got := RunPipeline(validLimitOrder(), testBroker, ctx)
@@ -114,34 +115,34 @@ func TestRunPipeline_RejectionConsumesNoSeqAndLeavesBookUntouched(t *testing.T) 
 	// have seen no calls. Covers all five reject reasons.
 	cases := []struct {
 		name    string
-		phase   Phase
+		phase   clock.Phase
 		build   func() *contract.FundedOrder
 		reason  contract.RejectReason
 		stage   string
 		orderID contract.OrderID
 	}{
 		{
-			name: "malformed", phase: PhaseContinuous,
+			name: "malformed", phase: clock.PhaseContinuous,
 			build:  func() *contract.FundedOrder { order := validLimitOrder(); order.Qty = 0; return order },
 			reason: contract.RejectMalformed, stage: "structural", orderID: "o-limit",
 		},
 		{
-			name: "market closed", phase: PhaseClosed,
+			name: "market closed", phase: clock.PhaseClosed,
 			build:  validLimitOrder,
 			reason: contract.RejectMarketClosed, stage: "session_phase", orderID: "o-limit",
 		},
 		{
-			name: "no liquidity", phase: PhaseContinuous,
+			name: "no liquidity", phase: clock.PhaseContinuous,
 			build:  validMarketOrder, // sell market vs empty bid
 			reason: contract.RejectNoLiquidity, stage: "liquidity", orderID: "o-market",
 		},
 		{
-			name: "bad tick", phase: PhaseContinuous,
+			name: "bad tick", phase: clock.PhaseContinuous,
 			build:  func() *contract.FundedOrder { order := validLimitOrder(); order.LimitPrice = 10021; return order },
 			reason: contract.RejectBadTick, stage: "tick_grid", orderID: "o-limit",
 		},
 		{
-			name: "beyond circuit", phase: PhaseContinuous,
+			name: "beyond circuit", phase: clock.PhaseContinuous,
 			// 99995 is on the size-5 grid and above the band's 10500 upper.
 			build:  func() *contract.FundedOrder { order := validLimitOrder(); order.LimitPrice = 99995; return order },
 			reason: contract.RejectBeyondCircuit, stage: "circuit_band", orderID: "o-limit",
@@ -223,7 +224,7 @@ func TestRunPipeline_AuctionRouteStillEnforcesTickAndBand(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, auction, _ := newPipelineCtx(
-				t, PhaseClosingAuction, 5, 0, 10500, book.NewBook("ACME"),
+				t, clock.PhaseClosingAuction, 5, 0, 10500, book.NewBook("ACME"),
 			)
 
 			got := RunPipeline(tc.build(), testBroker, ctx)
@@ -247,7 +248,7 @@ func TestRunPipeline_AuctionRouteSkipsLiquidityCheck(t *testing.T) {
 	// must not be blocked by any other stage: passes structural, no tick
 	// (market), no band (market), gets a Seq, diverts.
 	ctx, auction, _ := newPipelineCtx(
-		t, PhaseClosingAuction, 1, 0, 1_000_000, book.NewBook("ACME"),
+		t, clock.PhaseClosingAuction, 1, 0, 1_000_000, book.NewBook("ACME"),
 	)
 
 	got := RunPipeline(validMarketOrder(), testBroker, ctx)
@@ -269,7 +270,7 @@ func TestRunPipeline_DeterministicAcrossRuns(t *testing.T) {
 	// because MatchResult / RestingOrder contain pointer fields.
 	run := func() contract.EngineResult {
 		ctx, _, _ := newPipelineCtx(
-			t, PhaseContinuous, 1, 0, 1_000_000, book.NewBook("ACME"),
+			t, clock.PhaseContinuous, 1, 0, 1_000_000, book.NewBook("ACME"),
 		)
 		return RunPipeline(validLimitOrder(), testBroker, ctx)
 	}
