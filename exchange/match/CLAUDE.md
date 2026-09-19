@@ -26,8 +26,13 @@ book executes.
 ## Deps
 - `book` (concrete) — read via `Best()`/level inspection; mutate ONLY via
   `Insert`/`Cancel`/`ReduceFront`.
-- `CircuitClamp` and `SeqSource` are **interfaces — stub them now** (clamp = always
-  allow; seq = monotonic counter). Replaced by `circuit` (1.5) and `emit` (1.9) later.
+- `CircuitClamp` and `SeqSource` are **interfaces** owned here. Test-only stubs
+  (`allowAllClamp`, `bandedClamp`, `monotonicSeq`) live in `stubs_test.go` so match
+  stays independently unit-testable. `circuit.CircuitBand` (1.5) is the concrete
+  clamp — its interface satisfaction is cemented by a consumer-side compile-time
+  assertion (`var _ CircuitClamp = (*circuit.CircuitBand)(nil)`) in
+  `matcher_circuit_integration_test.go`. `SeqSource` will be satisfied by 1.9's
+  emitter when it lands; add a similar assertion there.
 - `contract` (`Trade, MatchResult, CancelReason, FundedOrder, STPMode`).
 
 ## Do NOT
