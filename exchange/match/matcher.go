@@ -56,11 +56,7 @@ func (matcher *Matcher) Match(
 	if order == nil {
 		panic("match.Match: nil order")
 	}
-
-	var trades []contract.Trade
-	remaining := order.Qty
-	walkReason := contract.ReasonNone
-
+	trades, remaining, walkReason := matcher.runWalk(order)
 	return matcher.assembleResult(order, brokerID, admissionSeq, trades, remaining, walkReason)
 }
 
