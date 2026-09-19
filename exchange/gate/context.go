@@ -3,6 +3,7 @@ package gate
 import (
 	"simulator/contract"
 	"simulator/exchange/book"
+	"simulator/exchange/clock"
 	"simulator/exchange/match"
 )
 
@@ -25,7 +26,7 @@ const (
 // (Next() Seq); the wiring layer passes distinct concrete counters.
 type gateCtx struct {
 	// Session-level (shared across instruments):
-	phase SessionPhase
+	phase clock.SessionPhase
 	rules Rulebook
 
 	// Per-instrument (wiring supplies these from InstrumentState):
