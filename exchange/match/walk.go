@@ -32,9 +32,10 @@ func isMarketBuy(order *contract.FundedOrder) bool {
 }
 
 // runWalk drives the continuous-matching loop for one taker: on each
-// iteration it reads the opposite side's best level, prints one trade at the
-// maker's price, and asks the book to execute the fill. For Market BUY it
-// also enforces the funded-cap: fillQty is capped by (MaxSpend-spent)/price
+// iteration it reads the opposite side's best level, applies self-match
+// prevention against the level's front, prints one trade at the maker's
+// price, and asks the book to execute the fill. For Market BUY it also
+// enforces the funded-cap: fillQty is capped by (MaxSpend-spent)/price
 // (integer floor) at step (e), and the walk halts post-fill once spent has
 // reached MaxSpend at step (h). Returns fills, unfilled remainder, and any
 // reason set during the walk. EXCHANGE_12 §6.
@@ -48,6 +49,7 @@ func (matcher *Matcher) runWalk(order *contract.FundedOrder) (
 	opposite := oppositeSide(order.Side)
 	spent := contract.Ticks(0)
 
+walkLoop:
 	for remaining > 0 {
 		bestLevel, hasLevel := matcher.book.Best(opposite)
 		if !hasLevel {
@@ -58,6 +60,24 @@ func (matcher *Matcher) runWalk(order *contract.FundedOrder) (
 		}
 
 		frontOrder := bestLevel.Orders.Front().Value.(*contract.RestingOrder)
+
+		// (c) self-match prevention. A self-match never prints — the STP
+		// mode picks which side to cancel, or both. EXCHANGE_12 §6 (c),
+		// §12 inv 4. GTC-limit takers cancelled here do NOT rest (§7).
+		if frontOrder.Participant == order.Participant {
+			switch order.STP {
+			case contract.CancelIncoming:
+				walkReason = contract.ReasonSelfMatch
+				break walkLoop
+			case contract.CancelResting:
+				matcher.book.Cancel(frontOrder.OrderID)
+				continue
+			case contract.CancelBoth:
+				matcher.book.Cancel(frontOrder.OrderID)
+				walkReason = contract.ReasonSelfMatch
+				break walkLoop
+			}
+		}
 
 		fillQty := remaining
 		if frontOrder.Remaining < fillQty {
