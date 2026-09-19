@@ -86,6 +86,7 @@ is the authority for the exchange↔broker wire shapes.
   component on an unbuilt one.
 - **One writer per domain:** the owner of a structure is its only writer; cross-domain
   work goes through that owner.
+- **Parameter Names:** use informational context fit parameter names not alphabets etc. Goal is to convey meaning of what each parameter is at any line of code to whoever is reading
 <!-- Deliberately NOT here: generic "clean code / DRY / SOLID / good names". gofmt +
      golangci-lint enforce the mechanical half; aspirational rules dilute attention. -->
 
