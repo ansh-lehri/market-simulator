@@ -8,7 +8,13 @@
   fills first), and the O(1) order index for cancel-by-id.
 - The derived `QuoteState` (best bid/ask + sizes + last price, each with a `Has*`
   presence flag), kept consistent as a side effect of every mutation.
-- The whole write surface = four mutators: `Insert`, `Cancel`, `ReduceFront`, `Quote`.
+- Public surface (EXCHANGE_11 §6): three bid/ask mutators — `Insert`, `Cancel`,
+  `ReduceFront` — each also maintaining the bid/ask half of the quote; two
+  reads — `Quote` (top-of-book snapshot by value) and `Best(side)` (the top
+  `*PriceLevel` the matcher hands back to `ReduceFront`); one matcher-only
+  writer for the last-price half, `SetLastPrice`. Precondition failures on
+  the writers panic (validate-before-mutate); a `Cancel` miss is a normal
+  outcome, not an error.
 
 ## Invariants (EXCHANGE_11 §9 — hold after every mutation)
 1. Price is always integer ticks. No float ever enters the book.
@@ -29,4 +35,6 @@
 - Touch money, positions, or any account state.
 - Emit wire events, or decide admission/matching — only provide the ops those call.
 - Use a mutex — single-writer by construction.
-- Write last price — that is the matcher's output, not a book mutation.
+- Write last price from any path except `SetLastPrice` — that is the matcher's
+  output, exposed via one dedicated method (EXCHANGE_11 §7.2). The three
+  bid/ask mutators never touch `LastPrice` or `HasLastPrice`.
