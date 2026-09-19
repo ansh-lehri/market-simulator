@@ -196,10 +196,10 @@ func TestRunPipeline_AuctionRouteStillEnforcesTickAndBand(t *testing.T) {
 	// — a sell limit against an empty book in PhaseClosingAuction diverts
 	// cleanly.)
 	cases := []struct {
-		name    string
-		build   func() *contract.FundedOrder
-		reason  contract.RejectReason
-		stage   string
+		name   string
+		build  func() *contract.FundedOrder
+		reason contract.RejectReason
+		stage  string
 	}{
 		{
 			name: "off-tick in auction still rejects",
