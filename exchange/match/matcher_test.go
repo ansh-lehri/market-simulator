@@ -444,3 +444,194 @@ func TestMatch_G10_TimePriorityWithinLevel(t *testing.T) {
 			quote.HasAsk, quote.BestAsk, quote.AskQty)
 	}
 }
+
+// G3 — Market BUY funded-cap floor: MaxSpend=25000 against Ask 10000×3 and
+// Ask 10025×2. Loop 1: fillQty=min(5,3)=3, affordable=25000/10000=2 (floor)
+// → capped to 2, print 2@10000, spent=20000, remaining=3. Loop 2: same
+// level has 1 left; fillQty=min(3,1)=1, affordable=(25000-20000)/10000=0
+// → fillQty=0, break FundedCap. CancelledQty=3, residual 5000 cash is
+// unspendable at 10000/unit (expected — EXCHANGE_12 §8.3). Never rests.
+func TestMatch_G3_MarketBuy_FundedCapFloor(t *testing.T) {
+	matcher, orderBook := newTestMatcher(t)
+	orderBook.Insert(makeResting("M1", "P_M1", contract.Sell, 10000, 3, 1))
+	orderBook.Insert(makeResting("M2", "P_M2", contract.Sell, 10025, 2, 2))
+
+	order := &contract.FundedOrder{
+		OrderID:     "T",
+		Participant: "P_T",
+		Instrument:  "ACME",
+		Side:        contract.Buy,
+		Type:        contract.Market,
+		TIF:         contract.IOC,
+		Qty:         5,
+		MaxSpend:    25000,
+	}
+
+	result := matcher.Match(order, "B_T", 500)
+
+	if len(result.Trades) != 1 {
+		t.Fatalf("Trades: got %d, want 1", len(result.Trades))
+	}
+	assertTrade(t, 0, result.Trades[0], contract.Trade{
+		Instrument: "ACME", Price: 10000, Qty: 2,
+		TakerOrder: "T", MakerOrder: "M1", TakerSide: contract.Buy,
+		TakerParticipant: "P_T", MakerParticipant: "P_M1",
+	})
+	if result.Rested != nil {
+		t.Errorf("Rested: got %+v, want nil (market never rests)", result.Rested)
+	}
+	if result.CancelledQty != 3 {
+		t.Errorf("CancelledQty: got %d, want 3", result.CancelledQty)
+	}
+	if result.CancelReason != contract.ReasonFundedCap {
+		t.Errorf("CancelReason: got %v, want ReasonFundedCap", result.CancelReason)
+	}
+	if !result.LastPriceMoved || result.LastPrice != 10000 {
+		t.Errorf("LastPrice: got (%d, moved=%v), want (10000, true)", result.LastPrice, result.LastPriceMoved)
+	}
+
+	// Ask side still has M1 (1 left) and M2 (2 left) — the walk stopped
+	// before consuming either fully.
+	quote := orderBook.Quote()
+	if !quote.HasAsk || quote.BestAsk != 10000 || quote.AskQty != 1 {
+		t.Errorf("best ask: got (has=%v price=%d qty=%d), want (true, 10000, 1)",
+			quote.HasAsk, quote.BestAsk, quote.AskQty)
+	}
+}
+
+// G3b — Market BUY without cap-bite: MaxSpend far exceeds cost. Order
+// fully fills at the resting price with no CancelledQty, no FundedCap.
+// Regression: funded-cap logic must not distort the normal-fill path.
+func TestMatch_G3b_MarketBuy_NoCapBite(t *testing.T) {
+	matcher, orderBook := newTestMatcher(t)
+	orderBook.Insert(makeResting("M1", "P_M", contract.Sell, 10000, 5, 1))
+
+	order := &contract.FundedOrder{
+		OrderID:     "T",
+		Participant: "P_T",
+		Instrument:  "ACME",
+		Side:        contract.Buy,
+		Type:        contract.Market,
+		TIF:         contract.IOC,
+		Qty:         5,
+		MaxSpend:    1_000_000,
+	}
+
+	result := matcher.Match(order, "B_T", 501)
+
+	if len(result.Trades) != 1 {
+		t.Fatalf("Trades: got %d, want 1", len(result.Trades))
+	}
+	assertTrade(t, 0, result.Trades[0], contract.Trade{
+		Instrument: "ACME", Price: 10000, Qty: 5,
+		TakerOrder: "T", MakerOrder: "M1", TakerSide: contract.Buy,
+		TakerParticipant: "P_T", MakerParticipant: "P_M",
+	})
+	if result.Rested != nil {
+		t.Errorf("Rested: got %+v, want nil", result.Rested)
+	}
+	if result.CancelledQty != 0 {
+		t.Errorf("CancelledQty: got %d, want 0", result.CancelledQty)
+	}
+	if result.CancelReason != contract.ReasonNone {
+		t.Errorf("CancelReason: got %v, want ReasonNone", result.CancelReason)
+	}
+	if !result.LastPriceMoved || result.LastPrice != 10000 {
+		t.Errorf("LastPrice: got (%d, moved=%v), want (10000, true)", result.LastPrice, result.LastPriceMoved)
+	}
+}
+
+// G3c — Market BUY exact-fit at MaxSpend: MaxSpend=20000 buys exactly 2
+// units of Ask 10000×2 in the first level (spent hits MaxSpend after the
+// fill), leaving remainder 3 that step (h) cancels with FundedCap.
+// Distinguishes the step-(h) post-fill halt from the step-(e) affordability
+// zero-out (which is G3).
+func TestMatch_G3c_MarketBuy_ExactFitStopsAtStepH(t *testing.T) {
+	matcher, orderBook := newTestMatcher(t)
+	orderBook.Insert(makeResting("M1", "P_M1", contract.Sell, 10000, 2, 1))
+	orderBook.Insert(makeResting("M2", "P_M2", contract.Sell, 10005, 5, 2))
+
+	order := &contract.FundedOrder{
+		OrderID:     "T",
+		Participant: "P_T",
+		Instrument:  "ACME",
+		Side:        contract.Buy,
+		Type:        contract.Market,
+		TIF:         contract.IOC,
+		Qty:         5,
+		MaxSpend:    20000, // exactly covers 2 units at 10000
+	}
+
+	result := matcher.Match(order, "B_T", 502)
+
+	if len(result.Trades) != 1 {
+		t.Fatalf("Trades: got %d, want 1", len(result.Trades))
+	}
+	assertTrade(t, 0, result.Trades[0], contract.Trade{
+		Instrument: "ACME", Price: 10000, Qty: 2,
+		TakerOrder: "T", MakerOrder: "M1", TakerSide: contract.Buy,
+		TakerParticipant: "P_T", MakerParticipant: "P_M1",
+	})
+	if result.Rested != nil {
+		t.Errorf("Rested: got %+v, want nil", result.Rested)
+	}
+	if result.CancelledQty != 3 {
+		t.Errorf("CancelledQty: got %d, want 3", result.CancelledQty)
+	}
+	if result.CancelReason != contract.ReasonFundedCap {
+		t.Errorf("CancelReason: got %v, want ReasonFundedCap", result.CancelReason)
+	}
+	if !result.LastPriceMoved || result.LastPrice != 10000 {
+		t.Errorf("LastPrice: got (%d, moved=%v), want (10000, true)", result.LastPrice, result.LastPriceMoved)
+	}
+
+	// M1 fully consumed, M2 still resting untouched.
+	quote := orderBook.Quote()
+	if !quote.HasAsk || quote.BestAsk != 10005 || quote.AskQty != 5 {
+		t.Errorf("best ask: got (has=%v price=%d qty=%d), want (true, 10005, 5)",
+			quote.HasAsk, quote.BestAsk, quote.AskQty)
+	}
+}
+
+// G3d — Market SELL regression: funded-cap logic is Market-BUY-only. A Sell
+// market walks bids without any MaxSpend check and fully fills against a
+// resting bid. Guards against a hypothetical bug where the affordability
+// branch (or step (h)) is accidentally reached for Sell markets.
+func TestMatch_G3d_MarketSell_FullFill(t *testing.T) {
+	matcher, orderBook := newTestMatcher(t)
+	orderBook.Insert(makeResting("M1", "P_M", contract.Buy, 10005, 5, 1))
+
+	order := &contract.FundedOrder{
+		OrderID:     "T",
+		Participant: "P_T",
+		Instrument:  "ACME",
+		Side:        contract.Sell,
+		Type:        contract.Market,
+		TIF:         contract.IOC,
+		Qty:         5,
+		MaxSpend:    0, // not used on a sell; must not influence the walk
+	}
+
+	result := matcher.Match(order, "B_T", 503)
+
+	if len(result.Trades) != 1 {
+		t.Fatalf("Trades: got %d, want 1", len(result.Trades))
+	}
+	assertTrade(t, 0, result.Trades[0], contract.Trade{
+		Instrument: "ACME", Price: 10005, Qty: 5,
+		TakerOrder: "T", MakerOrder: "M1", TakerSide: contract.Sell,
+		TakerParticipant: "P_T", MakerParticipant: "P_M",
+	})
+	if result.Rested != nil {
+		t.Errorf("Rested: got %+v, want nil", result.Rested)
+	}
+	if result.CancelledQty != 0 {
+		t.Errorf("CancelledQty: got %d, want 0", result.CancelledQty)
+	}
+	if result.CancelReason != contract.ReasonNone {
+		t.Errorf("CancelReason: got %v, want ReasonNone", result.CancelReason)
+	}
+	if !result.LastPriceMoved || result.LastPrice != 10005 {
+		t.Errorf("LastPrice: got (%d, moved=%v), want (10005, true)", result.LastPrice, result.LastPriceMoved)
+	}
+}
