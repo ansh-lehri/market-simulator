@@ -59,6 +59,15 @@ walkLoop:
 			break
 		}
 
+		// (b) circuit clamp: may a trade print at this level's price? If
+		// not, the walk halts here — the fills already printed stand; the
+		// remainder is disposed by assembleResult (market/IOC cancel with
+		// ClampCircuit; GTC-limit rests at its own LimitPrice — EX_15 §4).
+		if !matcher.clamp.PriceAllowed(bestLevel.Price) {
+			walkReason = contract.ReasonCircuitClamp
+			break
+		}
+
 		frontOrder := bestLevel.Orders.Front().Value.(*contract.RestingOrder)
 
 		// (c) self-match prevention. A self-match never prints — the STP
