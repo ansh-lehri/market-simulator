@@ -389,6 +389,63 @@ func TestBook_QuoteReturnedByValue(t *testing.T) {
 	}
 }
 
+// --- Best: matcher read-hook for the walk --------------------------------
+
+func TestBook_Best_EmptySideReturnsFalse(t *testing.T) {
+	book := NewBook("ACME")
+
+	if level, ok := book.Best(contract.Buy); ok || level != nil {
+		t.Fatalf("empty bid side: got (%v, %v), want (nil, false)", level, ok)
+	}
+	if level, ok := book.Best(contract.Sell); ok || level != nil {
+		t.Fatalf("empty ask side: got (%v, %v), want (nil, false)", level, ok)
+	}
+}
+
+func TestBook_Best_ReturnsExtremeLevel(t *testing.T) {
+	book := NewBook("ACME")
+	book.Insert(makeResting("B1", contract.Buy, 10018, 5))
+	book.Insert(makeResting("B2", contract.Buy, 10020, 3)) // higher bid = better
+	book.Insert(makeResting("A1", contract.Sell, 10025, 4))
+	book.Insert(makeResting("A2", contract.Sell, 10022, 6)) // lower ask = better
+
+	bestBid, hasBid := book.Best(contract.Buy)
+	if !hasBid {
+		t.Fatal("expected best bid to be present")
+	}
+	if bestBid.Price != 10020 {
+		t.Errorf("best bid price: got %d, want 10020", bestBid.Price)
+	}
+
+	bestAsk, hasAsk := book.Best(contract.Sell)
+	if !hasAsk {
+		t.Fatal("expected best ask to be present")
+	}
+	if bestAsk.Price != 10022 {
+		t.Errorf("best ask price: got %d, want 10022", bestAsk.Price)
+	}
+}
+
+func TestBook_Best_PointerFeedsReduceFront(t *testing.T) {
+	book := NewBook("ACME")
+	book.Insert(makeResting("A1", contract.Sell, 10022, 6))
+
+	level, ok := book.Best(contract.Sell)
+	if !ok {
+		t.Fatal("expected best ask")
+	}
+	// Same pointer round-trips through ReduceFront without needing a lookup.
+	book.ReduceFront(level, 4)
+
+	if level.TotalQty != 2 {
+		t.Errorf("level.TotalQty after ReduceFront: got %d, want 2", level.TotalQty)
+	}
+	quote := book.Quote()
+	if quote.AskQty != 2 {
+		t.Errorf("quote.AskQty: got %d, want 2", quote.AskQty)
+	}
+}
+
 // --- panic tests: preconditions ------------------------------------------
 
 func TestBook_Insert_PanicsOnDuplicateID(t *testing.T) {
