@@ -375,3 +375,56 @@ func TestProperty_Inv4_NoSelfMatchTradesUnderAnySTP(t *testing.T) {
 		}
 	})
 }
+
+// Invariant 5 (EXCHANGE_12 §12): Market and IOC never rest — only GTC-limit
+// remainders do. Exercised across BOTH taker sides and ALL THREE
+// non-restable order shapes ({Limit-IOC, Market-IOC, Market-GTC}). Also
+// asserts qty accounting closes for those shapes.
+func TestProperty_Inv5_MarketAndIOCNeverRest(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		takerSide := drawTakerSide(t)
+		matcher, _, _ := seedRandomMakers(t, oppositeSide(takerSide))
+
+		kind := rapid.IntRange(0, 2).Draw(t, "orderKind")
+		order := &contract.FundedOrder{
+			OrderID:     "T",
+			Participant: "P_T",
+			Instrument:  "ACME",
+			Side:        takerSide,
+			Qty:         contract.Qty(rapid.Int64Range(1, 200).Draw(t, "takerQty")),
+		}
+		switch kind {
+		case 0: // Limit + IOC
+			order.Type = contract.Limit
+			order.TIF = contract.IOC
+			order.LimitPrice = contract.Ticks(rapid.Int64Range(9900, 10100).Draw(t, "limit"))
+		case 1: // Market + IOC
+			order.Type = contract.Market
+			order.TIF = contract.IOC
+			if takerSide == contract.Buy {
+				order.MaxSpend = contract.Ticks(rapid.Int64Range(0, 2_000_000).Draw(t, "maxSpend"))
+			}
+		default: // Market + GTC (unusual but valid — market ignores TIF for resting)
+			order.Type = contract.Market
+			order.TIF = contract.GTC
+			if takerSide == contract.Buy {
+				order.MaxSpend = contract.Ticks(rapid.Int64Range(0, 2_000_000).Draw(t, "maxSpend"))
+			}
+		}
+
+		result := matcher.Match(order, "B_T", 999)
+
+		if result.Rested != nil {
+			t.Fatalf("takerSide=%v kind=%d (type=%v tif=%v) must never rest, got Rested=%+v",
+				takerSide, kind, order.Type, order.TIF, result.Rested)
+		}
+		var totalQty contract.Qty
+		for _, trade := range result.Trades {
+			totalQty += trade.Qty
+		}
+		if totalQty+result.CancelledQty != order.Qty {
+			t.Fatalf("takerSide=%v kind=%d qty accounting: filled=%d + cancelled=%d != order.Qty=%d",
+				takerSide, kind, totalQty, result.CancelledQty, order.Qty)
+		}
+	})
+}
