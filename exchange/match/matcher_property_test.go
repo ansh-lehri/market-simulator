@@ -428,3 +428,82 @@ func TestProperty_Inv5_MarketAndIOCNeverRest(t *testing.T) {
 		}
 	})
 }
+
+// Clamp property (EXCHANGE_12 §6 (b), §15 §3): under any circuit band, no
+// trade ever prints at a clamp-disallowed price, AND if the result carries
+// CancelReason == ReasonCircuitClamp, no trade printed at a price above the
+// clamp's upper bound (Buy) / below the lower bound (Sell) — the walk
+// really did halt at the band. Exercised across BOTH taker sides and BOTH
+// order types (Limit, Market).
+func TestProperty_ClampDisallowedPriceNeverPrints(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		lower := contract.Ticks(rapid.Int64Range(9990, 10025).Draw(t, "clampLower"))
+		upper := contract.Ticks(rapid.Int64Range(10025, 10060).Draw(t, "clampUpper"))
+		if lower > upper {
+			lower, upper = upper, lower
+		}
+		clamp := bandedClamp{lower: lower, upper: upper}
+
+		takerSide := drawTakerSide(t)
+		makerSide := oppositeSide(takerSide)
+
+		orderBook := book.NewBook("ACME")
+		matcher := NewMatcher(orderBook, clamp, &monotonicSeq{})
+
+		// Seed makers across a range that partially overlaps the clamp so
+		// clamp-halts are actually reached.
+		makerCount := rapid.IntRange(1, 6).Draw(t, "makerCount")
+		for makerIndex := 0; makerIndex < makerCount; makerIndex++ {
+			price := contract.Ticks(rapid.Int64Range(9950, 10100).Draw(t, fmt.Sprintf("price[%d]", makerIndex)))
+			qty := contract.Qty(rapid.Int64Range(1, 20).Draw(t, fmt.Sprintf("qty[%d]", makerIndex)))
+			orderBook.Insert(&contract.RestingOrder{
+				OrderID:     contract.OrderID(fmt.Sprintf("M%d", makerIndex)),
+				Participant: contract.ParticipantID(fmt.Sprintf("P_M%d", makerIndex)),
+				BrokerID:    "B_M",
+				Side:        makerSide,
+				Price:       price,
+				Remaining:   qty,
+				Seq:         contract.Seq(makerIndex + 1),
+			})
+		}
+
+		takerIsMarket := rapid.Bool().Draw(t, "takerIsMarket")
+		takerQty := contract.Qty(rapid.Int64Range(1, 200).Draw(t, "takerQty"))
+		order := &contract.FundedOrder{
+			OrderID:     "T",
+			Participant: "P_T",
+			Instrument:  "ACME",
+			Side:        takerSide,
+			Qty:         takerQty,
+		}
+		if takerIsMarket {
+			order.Type = contract.Market
+			order.TIF = contract.IOC
+			if takerSide == contract.Buy {
+				order.MaxSpend = 100_000_000
+			}
+		} else {
+			order.Type = contract.Limit
+			order.TIF = contract.GTC
+			order.LimitPrice = contract.Ticks(rapid.Int64Range(9900, 10120).Draw(t, "takerLimit"))
+		}
+
+		result := matcher.Match(order, "B_T", 999)
+
+		for tradeIndex, trade := range result.Trades {
+			if !clamp.PriceAllowed(trade.Price) {
+				t.Fatalf("takerSide=%v market=%v trade[%d] at price=%d violates clamp [%d, %d]",
+					takerSide, takerIsMarket, tradeIndex, trade.Price, lower, upper)
+			}
+		}
+
+		// Invariant 6 still holds under clamp halts: LastPriceMoved iff any
+		// trade printed; when moved, the value tracks the final trade.
+		if result.LastPriceMoved != (len(result.Trades) > 0) {
+			t.Fatalf("LastPriceMoved=%v vs len(Trades)=%d", result.LastPriceMoved, len(result.Trades))
+		}
+		if result.LastPriceMoved && result.LastPrice != result.Trades[len(result.Trades)-1].Price {
+			t.Fatalf("LastPrice=%d, want %d", result.LastPrice, result.Trades[len(result.Trades)-1].Price)
+		}
+	})
+}
