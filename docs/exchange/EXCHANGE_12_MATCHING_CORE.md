@@ -112,8 +112,9 @@ The admission gate (1.4), after admitting an order, hands it to:
 
 go
 // Match runs the continuous-matching walk for one admitted order and returns the
-// full result. It mutates the book only through the book's own mutators, and writes
-// last price directly (last price is the matcher's output, not a structural change).
+// full result. It mutates the book's structure only through Insert, Cancel, and
+// ReduceFront; and writes last price only through Book.SetLastPrice (last price
+// is the matcher's output, not a structural change — see EXCHANGE_11 §7.2).
 // Precondition: the order is admitted (gates 0–3 passed) and its Seq is stamped.
 func (m *Matcher) Match(o *FundedOrder) MatchResult
 
@@ -197,7 +198,7 @@ priceAcceptable(p, o): o.Side==Buy → p <= o.LimitPrice; o.Side==Sell → p >= 
 
 assembleResult finalizes three things:
 
-Last price. If any trade printed, last price = the price of the final trade in trades. The matcher writes it directly into the quote (1.7 §7.2) and sets LastPriceMoved = true. If no trade printed, last price is untouched.
+Last price. If any trade printed, last price = the price of the final trade in trades. The matcher writes it into the quote via `m.book.SetLastPrice(price)` (EXCHANGE_11 §6, §7.2 — the only path that mutates LastPrice/HasLastPrice) and sets result.LastPriceMoved = true. If no trade printed, SetLastPrice is not called and last price is untouched.
 
 The remainder (remaining units still unfilled) is disposed by order type:
 
@@ -213,9 +214,9 @@ Slippage is the arithmetic of steps (f)–(g) repeating across levels: a large t
 Price is level.Price written to last-price in §7 — the price of whichever resting order was hit, never anything the taker named.
 The funded-cap is steps (e)/(h): the walk stops spending when spent would exceed the broker-attached MaxSpend, using integer-floor affordability. A tiny residual of unspendable cash can remain (you cannot buy a fraction of a unit); that is correct.
 9. Who mutates what — the decide/execute split (restated as contract)
-The matcher reads the book only via Best() and level inspection, and mutates it only via ReduceFront, Insert, Cancel — the 1.1 mutators. It never splices a queue node, never edits TotalQty, never touches the index.
-The matcher writes last price directly, because last price is its output (the price of the trade it decided), not a structural mutation of the book.
-All book-invariant maintenance (TotalQty, empty-level removal, index upkeep, quote refresh) happens inside the 1.1 mutators — one place, four methods — so the matcher cannot corrupt the book by forgetting an invariant.
+The matcher reads the book only via Best() and level inspection, and mutates its structure only via ReduceFront, Insert, Cancel — the 1.1 bid/ask mutators. It never splices a queue node, never edits TotalQty, never touches the index.
+The matcher writes last price via `Book.SetLastPrice` — the sole path that mutates LastPrice/HasLastPrice — because last price is its output (the price of the trade it decided), not a structural mutation of the book. The bid/ask mutators never touch that half of the quote.
+All book-invariant maintenance (TotalQty, empty-level removal, index upkeep, bid/ask refresh) happens inside the three bid/ask mutators — one place, three methods — so the matcher cannot corrupt the book by forgetting an invariant.
 
 This is why the standalone cancel path (a participant pulling a resting order with no matching) and the matcher's fill path both funnel through the same book.Cancel / book.ReduceFront: mutation logic lives once, in the hands.
 
