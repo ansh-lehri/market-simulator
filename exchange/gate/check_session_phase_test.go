@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"simulator/contract"
+	"simulator/exchange/clock"
 )
 
 // orderVariants is the (name, factory) pair every phase test iterates so
@@ -29,7 +30,7 @@ func orderVariants() []struct {
 func TestCheckSessionPhase_ContinuousRoutesToMatch(t *testing.T) {
 	for _, variant := range orderVariants() {
 		t.Run(variant.name, func(t *testing.T) {
-			ctx := &gateCtx{phase: &stubPhase{phase: PhaseContinuous}}
+			ctx := &gateCtx{phase: &stubPhase{phase: clock.PhaseContinuous}}
 
 			got := checkSessionPhase(variant.build(), testBroker, ctx)
 
@@ -46,7 +47,7 @@ func TestCheckSessionPhase_ContinuousRoutesToMatch(t *testing.T) {
 func TestCheckSessionPhase_ClosingAuctionRoutesToAuction(t *testing.T) {
 	for _, variant := range orderVariants() {
 		t.Run(variant.name, func(t *testing.T) {
-			ctx := &gateCtx{phase: &stubPhase{phase: PhaseClosingAuction}}
+			ctx := &gateCtx{phase: &stubPhase{phase: clock.PhaseClosingAuction}}
 
 			got := checkSessionPhase(variant.build(), testBroker, ctx)
 
@@ -63,7 +64,7 @@ func TestCheckSessionPhase_ClosingAuctionRoutesToAuction(t *testing.T) {
 func TestCheckSessionPhase_ClosedRejects(t *testing.T) {
 	for _, variant := range orderVariants() {
 		t.Run(variant.name, func(t *testing.T) {
-			ctx := &gateCtx{phase: &stubPhase{phase: PhaseClosed}}
+			ctx := &gateCtx{phase: &stubPhase{phase: clock.PhaseClosed}}
 
 			got := checkSessionPhase(variant.build(), testBroker, ctx)
 
@@ -81,7 +82,7 @@ func TestCheckSessionPhase_UnknownPhaseRejectsDefensively(t *testing.T) {
 	// both order types so a future Type-sensitive edit cannot slip through.
 	for _, variant := range orderVariants() {
 		t.Run(variant.name, func(t *testing.T) {
-			ctx := &gateCtx{phase: &stubPhase{phase: Phase(99)}}
+			ctx := &gateCtx{phase: &stubPhase{phase: clock.Phase(99)}}
 
 			got := checkSessionPhase(variant.build(), testBroker, ctx)
 
