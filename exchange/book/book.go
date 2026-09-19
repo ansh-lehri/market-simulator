@@ -126,6 +126,15 @@ func (book *Book) Quote() QuoteState {
 	return book.quote
 }
 
+// Best returns the top price level of the given side (highest bid for Buy,
+// lowest ask for Sell), or nil/false when that side is empty. It is the
+// matcher's read-hook for the walk: the returned *PriceLevel is the same
+// pointer that must be handed back to ReduceFront to execute a fill against
+// it. See EXCHANGE_11 §5.3 and §6.
+func (book *Book) Best(side contract.Side) (*PriceLevel, bool) {
+	return book.sideBook(side).Best()
+}
+
 // SetLastPrice is the matcher's write hook for last price. It is the ONLY path
 // that mutates LastPrice/HasLastPrice; no book mutator touches them. See
 // EXCHANGE_11 §7.2 and the plan discussion. Price 0 is a bug (a trade never
