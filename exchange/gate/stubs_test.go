@@ -48,6 +48,14 @@ func (source *monotonicSeq) Next() contract.Seq {
 	return contract.Seq(source.counter)
 }
 
+// allowAllClamp satisfies match.CircuitClamp for pipeline tests that
+// construct a real *match.Matcher. Distinct from stubBounds (which satisfies
+// gate's CircuitBounds) because match.CircuitClamp has a different shape —
+// PriceAllowed(price) bool, not Bounds() (lower, upper Ticks).
+type allowAllClamp struct{}
+
+func (allowAllClamp) PriceAllowed(price contract.Ticks) bool { return true }
+
 // assertReject fails the test if outcome is not a well-formed Rejected
 // EngineResult carrying the given reason, stage, orderID, and brokerID.
 func assertReject(
