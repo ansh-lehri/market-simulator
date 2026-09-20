@@ -56,6 +56,8 @@ func NewExchange(numShards int, schedule clock.SessionSchedule, instruments []In
 	for shardID := 0; shardID < numShards; shardID++ {
 		shardInbound[shardID] = make(chan contract.InboundMessage)
 		shardInboundSend[shardID] = shardInbound[shardID]
+		// sessionClock (*clock.SessionClock) implements clock.SessionPhase;
+		// the shard receives it via the interface (see Shard.phase docs).
 		shards[shardID] = newShard(shardID, shardInbound[shardID], sessionClock, publicTape, privateStream)
 	}
 
