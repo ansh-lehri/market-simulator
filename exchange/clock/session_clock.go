@@ -8,7 +8,7 @@ import (
 
 // SessionClock is the passive phase calculator (EXCHANGE_18). It holds the
 // SessionSchedule handed in by Layer 7 and a single atomic.Int32 carrying
-// the last-computed Phase. checkTransition is the sole writer of current;
+// the last-computed Phase. CheckTransition is the sole writer of current;
 // Current is a plain atomic load read by every shard-side consumer.
 type SessionClock struct {
 	schedule SessionSchedule
@@ -29,16 +29,16 @@ func NewSessionClock(schedule SessionSchedule) *SessionClock {
 
 // Current implements SessionPhase. It is an atomic load of the
 // last-computed phase; it never reads the OS clock and never scans the
-// schedule. The monitor keeps the field fresh via checkTransition.
+// schedule. The monitor keeps the field fresh via CheckTransition.
 func (clock *SessionClock) Current() Phase {
 	return Phase(clock.current.Load())
 }
 
-// checkTransition compares now against the schedule, updates the stored
+// CheckTransition compares now against the schedule, updates the stored
 // phase if a boundary was crossed since the last call, and returns the
 // transition (or nil when unchanged). It is the sole writer of current;
 // the wiring's monitor is the sole caller.
-func (clock *SessionClock) checkTransition(now time.Time) *PhaseTransition {
+func (clock *SessionClock) CheckTransition(now time.Time) *PhaseTransition {
 	want := clock.phaseAt(now)
 	old := Phase(clock.current.Load())
 	if want == old {

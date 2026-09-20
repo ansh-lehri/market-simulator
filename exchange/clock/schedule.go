@@ -19,8 +19,8 @@ type SessionSchedule struct {
 	Boundaries []PhaseBoundary
 }
 
-// PhaseTransition is the value checkTransition returns when the phase
-// changes. At is the now argument passed to checkTransition — the instant
+// PhaseTransition is the value CheckTransition returns when the phase
+// changes. At is the now argument passed to CheckTransition — the instant
 // the transition was detected, not the boundary's own At.
 type PhaseTransition struct {
 	From Phase

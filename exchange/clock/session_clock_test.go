@@ -66,11 +66,11 @@ func TestNewSessionClock_StartsClosed(t *testing.T) {
 func TestCurrent_NeverAdvancesWithoutCheckTransition(t *testing.T) {
 	// The schedule's first boundary is already in the past relative to
 	// this now, yet Current must stay PhaseClosed until the monitor
-	// calls checkTransition. Enforces invariant 3 (Current reads no
+	// calls CheckTransition. Enforces invariant 3 (Current reads no
 	// OS clock and does not recompute).
 	clock := NewSessionClock(canonicalSchedule())
 	if got := clock.Current(); got != PhaseClosed {
-		t.Fatalf("Current() = %d before any checkTransition, want PhaseClosed", got)
+		t.Fatalf("Current() = %d before any CheckTransition, want PhaseClosed", got)
 	}
 }
 
@@ -136,14 +136,14 @@ func TestCheckTransition_ReportsBoundaryCrossings(t *testing.T) {
 
 	for _, step := range steps {
 		t.Run(step.name, func(t *testing.T) {
-			transition := clock.checkTransition(step.now)
+			transition := clock.CheckTransition(step.now)
 			if step.wantNil {
 				if transition != nil {
-					t.Fatalf("checkTransition(%s) = %+v, want nil", step.now, transition)
+					t.Fatalf("CheckTransition(%s) = %+v, want nil", step.now, transition)
 				}
 			} else {
 				if transition == nil {
-					t.Fatalf("checkTransition(%s) = nil, want %d -> %d", step.now, step.wantFrom, step.wantTo)
+					t.Fatalf("CheckTransition(%s) = nil, want %d -> %d", step.now, step.wantFrom, step.wantTo)
 				}
 				if transition.From != step.wantFrom || transition.To != step.wantTo {
 					t.Fatalf("transition = %d -> %d, want %d -> %d",
@@ -170,18 +170,18 @@ func TestCheckTransition_DelayedTickAcrossPhases(t *testing.T) {
 	midAuction := sessionStart.Add(5*time.Hour + 20*time.Minute)
 	afterClose := sessionStart.Add(6 * time.Hour)
 
-	first := clock.checkTransition(midAuction)
+	first := clock.CheckTransition(midAuction)
 	if first == nil {
-		t.Fatalf("first checkTransition = nil, want Closed -> ClosingAuction")
+		t.Fatalf("first CheckTransition = nil, want Closed -> ClosingAuction")
 	}
 	if first.From != PhaseClosed || first.To != PhaseClosingAuction {
 		t.Fatalf("first transition = %d -> %d, want %d -> %d",
 			first.From, first.To, PhaseClosed, PhaseClosingAuction)
 	}
 
-	second := clock.checkTransition(afterClose)
+	second := clock.CheckTransition(afterClose)
 	if second == nil {
-		t.Fatalf("second checkTransition = nil, want ClosingAuction -> Closed")
+		t.Fatalf("second CheckTransition = nil, want ClosingAuction -> Closed")
 	}
 	if second.From != PhaseClosingAuction || second.To != PhaseClosed {
 		t.Fatalf("second transition = %d -> %d, want %d -> %d",
@@ -192,14 +192,14 @@ func TestCheckTransition_DelayedTickAcrossPhases(t *testing.T) {
 func TestCheckTransition_DelayedTickThroughToTerminalReturnsNil(t *testing.T) {
 	// Fresh clock (init PhaseClosed) + single tick past the terminal
 	// PhaseClosed boundary: phaseAt returns PhaseClosed, so the net
-	// phase is unchanged and checkTransition must report nil. This
+	// phase is unchanged and CheckTransition must report nil. This
 	// pins invariant 6's corner: no spurious same-phase transition.
 	clock := NewSessionClock(canonicalSchedule())
 	afterClose := sessionStart.Add(6 * time.Hour)
 
-	transition := clock.checkTransition(afterClose)
+	transition := clock.CheckTransition(afterClose)
 	if transition != nil {
-		t.Fatalf("checkTransition(%s) = %+v, want nil (net phase unchanged: Closed -> Closed)",
+		t.Fatalf("CheckTransition(%s) = %+v, want nil (net phase unchanged: Closed -> Closed)",
 			afterClose, transition)
 	}
 	if got := clock.Current(); got != PhaseClosed {

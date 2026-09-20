@@ -1,7 +1,7 @@
 // Package clock implements the exchange's session-phase calculator (1.8).
 //
 // It owns a SessionSchedule handed in by Layer 7 and reports the current
-// Phase to consumers via Current(). checkTransition, driven by the
+// Phase to consumers via Current(). CheckTransition, driven by the
 // wiring's per-second monitor, is the sole writer of the phase field
 // (an atomic.Int32 read concurrently by every shard-side consumer).
 //
