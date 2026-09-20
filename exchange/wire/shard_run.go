@@ -31,10 +31,7 @@ func (shard *Shard) run() {
 		case contract.SubmitOrder:
 			shard.handleSubmit(state, msg.BrokerID, msg.Submit)
 		case contract.CancelOrder:
-			panic(fmt.Sprintf(
-				"wire: shard %d received CancelOrder for %q — cancel path not yet implemented (Stage 4)",
-				shard.id, msg.Instrument,
-			))
+			shard.handleCancel(state, msg.BrokerID, msg.Cancel)
 		default:
 			panic(fmt.Sprintf("wire: shard %d received unknown InboundKind %d", shard.id, msg.Kind))
 		}
