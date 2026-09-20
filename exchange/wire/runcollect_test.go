@@ -110,3 +110,15 @@ func inboundSubmit(brokerID contract.BrokerID, order *contract.FundedOrder) cont
 		Submit:     order,
 	}
 }
+
+// inboundCancel wraps a CancelRequest in an InboundMessage. Instrument is
+// carried on the envelope because ingress routes on it; cancel needs no
+// price, no funding — the OrderID alone identifies the resting order.
+func inboundCancel(brokerID contract.BrokerID, instrument contract.InstrumentID, orderID contract.OrderID) contract.InboundMessage {
+	return contract.InboundMessage{
+		Kind:       contract.CancelOrder,
+		BrokerID:   brokerID,
+		Instrument: instrument,
+		Cancel:     &contract.CancelRequest{OrderID: orderID},
+	}
+}
