@@ -1,6 +1,7 @@
 package cost
 
 import (
+	"reflect"
 	"testing"
 
 	"pgregory.net/rapid"
@@ -108,6 +109,103 @@ func TestProperty_FillCost_NonNegativeLines(t *testing.T) {
 				rt.Fatalf("negative line %q = %d for input=%+v, Lines=%v",
 					lineName, amount, input, result.Lines)
 			}
+		}
+	})
+}
+
+// drawOrderCostInput generates arbitrary OrderCostInput values.
+func drawOrderCostInput(rt *rapid.T) OrderCostInput {
+	return OrderCostInput{
+		EverFilled: rapid.Bool().Draw(rt, "EverFilled"),
+		TotalQty:   rapid.Int64Range(0, 1_000_000_000).Draw(rt, "TotalQty"),
+		Side:       drawSide(rt),
+	}
+}
+
+// Total is always sum(Lines) — the universal contract, extended to the
+// order-cost method.
+func TestProperty_OrderCost_TotalEqualsSumOfLines(t *testing.T) {
+	module := NewIndiaCostModule(testIndiaRates)
+	rapid.Check(t, func(rt *rapid.T) {
+		input := drawOrderCostInput(rt)
+		result := module.ComputeOrderCost(input)
+		if result.Total != sum(result.Lines) {
+			rt.Fatalf("Total (%d) != sum(Lines) (%d) for input=%+v, Lines=%v",
+				result.Total, sum(result.Lines), input, result.Lines)
+		}
+	})
+}
+
+// EverFilled=false must always produce an empty result.
+func TestProperty_OrderCost_NeverFilledEmptyResult(t *testing.T) {
+	module := NewIndiaCostModule(testIndiaRates)
+	rapid.Check(t, func(rt *rapid.T) {
+		input := drawOrderCostInput(rt)
+		input.EverFilled = false
+		result := module.ComputeOrderCost(input)
+		if len(result.Lines) != 0 {
+			rt.Fatalf("never-filled produced non-empty Lines: %v", result.Lines)
+		}
+		if result.Total != 0 {
+			rt.Fatalf("never-filled Total = %d, want 0", result.Total)
+		}
+	})
+}
+
+// EverFilled=true must always produce exactly two lines: brokerage and gst.
+// No stray keys, no missing keys.
+func TestProperty_OrderCost_FilledHasExactlyBrokerageAndGST(t *testing.T) {
+	module := NewIndiaCostModule(testIndiaRates)
+	rapid.Check(t, func(rt *rapid.T) {
+		input := drawOrderCostInput(rt)
+		input.EverFilled = true
+		result := module.ComputeOrderCost(input)
+		if len(result.Lines) != 2 {
+			rt.Fatalf("expected exactly 2 lines, got %d: %v", len(result.Lines), result.Lines)
+		}
+		if _, present := result.Lines[lineBrokerage]; !present {
+			rt.Fatalf("missing brokerage line: %v", result.Lines)
+		}
+		if _, present := result.Lines[lineGST]; !present {
+			rt.Fatalf("missing gst line: %v", result.Lines)
+		}
+	})
+}
+
+// India ignores TotalQty on ComputeOrderCost — two inputs differing only
+// in TotalQty produce identical Lines and Total. Guards against a size-tiered
+// brokerage bug slipping in.
+func TestProperty_OrderCost_IndiaIgnoresTotalQty(t *testing.T) {
+	module := NewIndiaCostModule(testIndiaRates)
+	rapid.Check(t, func(rt *rapid.T) {
+		everFilled := rapid.Bool().Draw(rt, "EverFilled")
+		side := drawSide(rt)
+		qtyA := rapid.Int64Range(0, 1_000_000_000).Draw(rt, "QtyA")
+		qtyB := rapid.Int64Range(0, 1_000_000_000).Draw(rt, "QtyB")
+
+		resultA := module.ComputeOrderCost(OrderCostInput{EverFilled: everFilled, TotalQty: qtyA, Side: side})
+		resultB := module.ComputeOrderCost(OrderCostInput{EverFilled: everFilled, TotalQty: qtyB, Side: side})
+
+		if !reflect.DeepEqual(resultA, resultB) {
+			rt.Fatalf("TotalQty leaked into output:\n  qtyA=%d -> %+v\n  qtyB=%d -> %+v",
+				qtyA, resultA, qtyB, resultB)
+		}
+	})
+}
+
+// India ignores Side on ComputeOrderCost — buy and sell produce identical
+// results for the same EverFilled + TotalQty.
+func TestProperty_OrderCost_IndiaIgnoresSide(t *testing.T) {
+	module := NewIndiaCostModule(testIndiaRates)
+	rapid.Check(t, func(rt *rapid.T) {
+		everFilled := rapid.Bool().Draw(rt, "EverFilled")
+		qty := rapid.Int64Range(0, 1_000_000_000).Draw(rt, "TotalQty")
+
+		resultBuy := module.ComputeOrderCost(OrderCostInput{EverFilled: everFilled, TotalQty: qty, Side: contract.Buy})
+		resultSell := module.ComputeOrderCost(OrderCostInput{EverFilled: everFilled, TotalQty: qty, Side: contract.Sell})
+
+		if !reflect.DeepEqual(resultBuy, resultSell) {
+			rt.Fatalf("Side leaked into output:\n  buy  -> %+v\n  sell -> %+v", resultBuy, resultSell)
 		}
 	})
 }
