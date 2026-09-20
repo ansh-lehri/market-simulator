@@ -3,10 +3,10 @@ package wire
 import "simulator/exchange/clock"
 
 // stubPhase implements clock.SessionPhase with a settable phase, mirroring
-// gate/stubs_test.go's version. Wire tests need this because
-// *clock.SessionClock's checkTransition is unexported — the real clock can
-// only report PhaseClosed from outside its package until Stage 5's monitor
-// goroutine lands.
+// gate/stubs_test.go's version. Wire tests use it (rather than a real
+// *clock.SessionClock) because injecting a fixed phase is simpler than
+// building a schedule and driving CheckTransition — the real clock
+// reports PhaseClosed until a transition is explicitly triggered.
 type stubPhase struct {
 	phase clock.Phase
 }
