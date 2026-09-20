@@ -2,6 +2,7 @@ package wire
 
 import (
 	"fmt"
+	"sort"
 
 	"simulator/contract"
 	"simulator/exchange/clock"
@@ -27,6 +28,7 @@ type Exchange struct {
 	private   chan contract.EngineResult
 	ingress   *Ingress
 	shards    []*Shard
+	monitor   *Monitor
 	clock     *clock.SessionClock
 	numShards int
 }
@@ -68,8 +70,21 @@ func NewExchange(numShards int, schedule clock.SessionSchedule, instruments []In
 		}
 		shards[shardID].instrs[spec.Instrument] = newInstrumentState(spec, publicTape, privateStream)
 	}
+	// Finalise each shard's sorted instrument-id slice for deterministic
+	// iteration in handleTick and handleControl.
+	for _, shard := range shards {
+		shard.instrIDs = sortedInstrumentIDs(shard.instrs)
+	}
 
 	ingress := newIngress(inbound, shardInboundSend)
+
+	// Monitor takes the send-only end of every shard's control channel.
+	// It is the sole caller of clock.CheckTransition (EXCHANGE_18 inv 2).
+	controlSend := make([]chan<- controlMessage, numShards)
+	for shardID := 0; shardID < numShards; shardID++ {
+		controlSend[shardID] = shards[shardID].control
+	}
+	monitor := newMonitor(sessionClock, controlSend)
 
 	return &Exchange{
 		Inbound:   inbound,
@@ -80,7 +95,21 @@ func NewExchange(numShards int, schedule clock.SessionSchedule, instruments []In
 		private:   privateStream,
 		ingress:   ingress,
 		shards:    shards,
+		monitor:   monitor,
 		clock:     sessionClock,
 		numShards: numShards,
 	}
+}
+
+// sortedInstrumentIDs returns the map's keys as a slice sorted
+// lexicographically. Called once per shard at construction; the resulting
+// slice is stable for the shard's life (mid-life instrument add is out of
+// scope per EXCHANGE_10 §8).
+func sortedInstrumentIDs(instrs map[contract.InstrumentID]*InstrumentState) []contract.InstrumentID {
+	ids := make([]contract.InstrumentID, 0, len(instrs))
+	for id := range instrs {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	return ids
 }
