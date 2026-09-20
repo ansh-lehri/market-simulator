@@ -19,6 +19,7 @@ type Monitor struct {
 	sessionClock *clock.SessionClock
 	controlOut   []chan<- controlMessage
 	ticker       <-chan time.Time
+	stop         <-chan struct{}
 }
 
 func newMonitor(sessionClock *clock.SessionClock, controlOut []chan<- controlMessage) *Monitor {
@@ -28,29 +29,42 @@ func newMonitor(sessionClock *clock.SessionClock, controlOut []chan<- controlMes
 	}
 }
 
-// run reads ticks off ticker until it closes. On each tick it consults the
-// clock; a transition triggers one control message per shard. No transition
-// → no broadcast (the "no no-op fan-out" rule that would otherwise emit
-// duplicate session events).
+// run reads ticks off ticker and consults the clock; a transition triggers
+// one control message per shard. No transition → no broadcast (the "no
+// no-op fan-out" rule that would otherwise emit duplicate session events).
+//
+// Two exit signals:
+//   - ticker close (used by Stage 5 tests that hand-drive time).
+//   - stop close (used by Exchange.Stop in production; nil in tests → arm
+//     never fires, preserving Stage 5 behavior).
 func (monitor *Monitor) run() {
 	slog.Debug("monitor.run starting")
-	for now := range monitor.ticker {
-		transition := monitor.sessionClock.CheckTransition(now)
-		if transition == nil {
-			continue
-		}
-		slog.Info("session phase transition",
-			"from", transition.From,
-			"to", transition.To,
-			"at", transition.At,
-		)
-		message := controlMessage{
-			kind:       controlSessionTransition,
-			transition: *transition,
-		}
-		for _, out := range monitor.controlOut {
-			out <- message
+	for {
+		select {
+		case now, ok := <-monitor.ticker:
+			if !ok {
+				slog.Debug("monitor.run stopped (ticker closed)")
+				return
+			}
+			transition := monitor.sessionClock.CheckTransition(now)
+			if transition == nil {
+				continue
+			}
+			slog.Info("session phase transition",
+				"from", transition.From,
+				"to", transition.To,
+				"at", transition.At,
+			)
+			message := controlMessage{
+				kind:       controlSessionTransition,
+				transition: *transition,
+			}
+			for _, out := range monitor.controlOut {
+				out <- message
+			}
+		case <-monitor.stop:
+			slog.Debug("monitor.run stopped (stop signal)")
+			return
 		}
 	}
-	slog.Debug("monitor.run stopped")
 }
