@@ -73,10 +73,22 @@ func (module IndiaCostModule) ComputeFillCost(input FillCostInput) CostBreakdown
 	return CostBreakdown{Lines: lines, Total: sum(lines)}
 }
 
-// ComputeOrderCost is stubbed in Stage 2 so IndiaCostModule satisfies
-// CostModule at compile time. The real body — the ₹20-once brokerage rule
-// plus its GST — lands in Stage 3.
+// ComputeOrderCost returns the per-executed-order India charge: flat ₹20
+// brokerage plus 18% GST on the brokerage. Charged once at the order's
+// terminal step; an order that never filled pays zero. TotalQty and Side
+// are ignored by India (present on the input for markets that need them).
+//
+// This method only *computes*; the fire-exactly-once guard lives in the
+// caller (5.2's Convert / Release via the BrokerageCharged flag on the
+// reservation record). Calling this twice with EverFilled=true returns the
+// full brokerage twice — that is a caller bug, not this method's concern.
 func (module IndiaCostModule) ComputeOrderCost(input OrderCostInput) CostBreakdown {
-	_ = input
-	return CostBreakdown{Lines: map[string]int64{}, Total: 0}
+	if !input.EverFilled {
+		return CostBreakdown{Lines: map[string]int64{}, Total: 0}
+	}
+	lines := map[string]int64{
+		lineBrokerage: module.rates.Brokerage,
+		lineGST:       applyRate(module.rates.Brokerage, module.rates.GST),
+	}
+	return CostBreakdown{Lines: lines, Total: sum(lines)}
 }
