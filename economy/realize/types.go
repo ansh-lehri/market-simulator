@@ -51,6 +51,12 @@ type RealizationInput struct {
 	// generator fills in a default at flush when all fills were empty.
 	TradeID TradeID
 
+	// Direction of the round-trip ("long" / "short"). Set by the caller who
+	// knows whether this sell is closing a long or opening a short; realize
+	// captures the first non-empty value observed and passes it through to
+	// the assembled row. Prototype is long-only.
+	Direction string
+
 	// ExitAt is this fill's timestamp — the round-trip's ExitAt tracks the
 	// latest across folded fills. Supplied by the caller so this package
 	// holds no clock (auto-square stamps time.Now at its boundary).
