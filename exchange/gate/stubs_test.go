@@ -7,9 +7,9 @@ import (
 
 // stubPhase implements clock.SessionPhase with a settable current phase.
 // Consumers stub the interface here rather than constructing a real
-// *clock.SessionClock because clock's checkTransition is unexported —
-// there is no way to make a real clock report anything but PhaseClosed
-// from outside its package.
+// *clock.SessionClock because pipeline tests want a settable phase per
+// case; driving a real clock's CheckTransition with matching schedules
+// would add noise without covering anything the gate cares about.
 type stubPhase struct {
 	phase clock.Phase
 }
