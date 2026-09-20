@@ -55,7 +55,7 @@ func TestNewExchange_InstrumentLandsOnHashedShard(t *testing.T) {
 
 // TestNewExchange_ClockInitialPhaseIsClosed pins the clock's start-of-life
 // state (EXCHANGE_18: NewSessionClock stores PhaseClosed until the first
-// checkTransition). Wire relies on this so the gate rejects orders before
+// CheckTransition). Wire relies on this so the gate rejects orders before
 // the monitor first fires.
 func TestNewExchange_ClockInitialPhaseIsClosed(t *testing.T) {
 	exchange := NewExchange(1, makeSchedule(), []InstrumentSpec{makeSpec("A")})
