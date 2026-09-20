@@ -2,7 +2,10 @@ package wire
 
 import (
 	"fmt"
+	"log/slog"
 	"sort"
+	"sync"
+	"time"
 
 	"simulator/contract"
 	"simulator/exchange/clock"
@@ -31,6 +34,14 @@ type Exchange struct {
 	monitor   *Monitor
 	clock     *clock.SessionClock
 	numShards int
+
+	// Lifecycle machinery — populated on Start, consumed on Stop.
+	startOnce     sync.Once
+	stopOnce      sync.Once
+	wg            sync.WaitGroup
+	monitorTicker *time.Ticker
+	monitorStop   chan struct{}
+	shardTickers  []*time.Ticker
 }
 
 // NewExchange composes an Exchange from a session schedule and a set of
@@ -112,4 +123,86 @@ func sortedInstrumentIDs(instrs map[contract.InstrumentID]*InstrumentState) []co
 	}
 	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
 	return ids
+}
+
+// Start wires real time.Ticker sources to the monitor and each shard, then
+// launches the monitor, all shard loops, and the ingress as goroutines.
+// Idempotent — a second call is a no-op.
+//
+// tickInterval drives both the monitor's phase-transition check and each
+// shard's OHLCV roll cadence. Production uses time.Second (per EXCHANGE_10
+// §4); tests may pass a shorter interval for faster feedback.
+func (exchange *Exchange) Start(tickInterval time.Duration) {
+	exchange.startOnce.Do(func() {
+		exchange.monitorTicker = time.NewTicker(tickInterval)
+		exchange.monitor.ticker = exchange.monitorTicker.C
+		exchange.monitorStop = make(chan struct{})
+		exchange.monitor.stop = exchange.monitorStop
+
+		exchange.shardTickers = make([]*time.Ticker, len(exchange.shards))
+		for shardIndex, shard := range exchange.shards {
+			ticker := time.NewTicker(tickInterval)
+			exchange.shardTickers[shardIndex] = ticker
+			shard.ticker = ticker.C
+		}
+
+		// One WaitGroup for every long-lived goroutine: monitor + shards + ingress.
+		exchange.wg.Add(1 + len(exchange.shards) + 1)
+
+		go func() {
+			defer exchange.wg.Done()
+			exchange.monitor.run()
+		}()
+		for _, shard := range exchange.shards {
+			shard := shard
+			go func() {
+				defer exchange.wg.Done()
+				shard.run()
+			}()
+		}
+		go func() {
+			defer exchange.wg.Done()
+			exchange.ingress.run()
+		}()
+
+		slog.Info("exchange started",
+			"shards", len(exchange.shards),
+			"tickInterval", tickInterval,
+		)
+	})
+}
+
+// Stop tears down the running exchange in the order Stage 5 requires so no
+// goroutine ends up sending on a closed channel or blocked on a dead
+// receiver. Idempotent, and safe to call on an exchange that was never
+// started.
+//
+// Ordering (each step is a happens-before barrier for the next):
+//  1. Close monitor's stop signal → monitor exits before it can send more
+//     control messages to shards.
+//  2. Stop all real tickers so no fresh tick lands.
+//  3. Close the edge inbound → ingress drains + closes each shard inbound
+//     → shard loops finish their last message and return.
+//  4. wg.Wait for monitor + shards + ingress.
+//  5. Close public + private now that no writer remains.
+//
+// After Stop returns, sending on Inbound panics (send on closed channel).
+// Callers must gate their send loop on their own shutdown signal.
+func (exchange *Exchange) Stop() {
+	exchange.stopOnce.Do(func() {
+		if exchange.monitorStop == nil {
+			// Never Start()-ed — nothing to tear down.
+			return
+		}
+		close(exchange.monitorStop)
+		exchange.monitorTicker.Stop()
+		for _, ticker := range exchange.shardTickers {
+			ticker.Stop()
+		}
+		close(exchange.inbound)
+		exchange.wg.Wait()
+		close(exchange.public)
+		close(exchange.private)
+		slog.Info("exchange stopped")
+	})
 }
