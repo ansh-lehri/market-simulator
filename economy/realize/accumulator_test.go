@@ -28,7 +28,7 @@ func TestAccumulator_G8_PartialSellsAccumulateToOneRow(t *testing.T) {
 	fillATime := time.Date(2026, 1, 15, 10, 0, 0, 0, time.UTC)
 	fillBTime := time.Date(2026, 1, 15, 10, 30, 0, 0, time.UTC)
 
-	acc := &RealizationAccumulator{
+	accumulator := &RealizationAccumulator{
 		AccountID:      "acct-1",
 		SessionID:      "sess-1",
 		InstrumentID:   "ACME",
@@ -44,19 +44,19 @@ func TestAccumulator_G8_PartialSellsAccumulateToOneRow(t *testing.T) {
 		ExitAt:      fillATime,
 		Direction:   "long",
 	}
-	acc.fold(inputA, ComputeRealizedPnl(inputA))
+	accumulator.fold(inputA, ComputeRealizedPnl(inputA))
 
-	if acc.QtyClosed != 4 {
-		t.Errorf("after fill A: QtyClosed want 4, got %d", acc.QtyClosed)
+	if accumulator.QtyClosed != 4 {
+		t.Errorf("after fill A: QtyClosed want 4, got %d", accumulator.QtyClosed)
 	}
-	if acc.GrossAccum != 40 {
-		t.Errorf("after fill A: GrossAccum want 40, got %d", acc.GrossAccum)
+	if accumulator.GrossAccum != 40 {
+		t.Errorf("after fill A: GrossAccum want 40, got %d", accumulator.GrossAccum)
 	}
-	if acc.CostsTotal != 3 {
-		t.Errorf("after fill A: CostsTotal want 3, got %d", acc.CostsTotal)
+	if accumulator.CostsTotal != 3 {
+		t.Errorf("after fill A: CostsTotal want 3, got %d", accumulator.CostsTotal)
 	}
-	if !reflect.DeepEqual(acc.CostsAccum, map[string]int64{"stt": 2, "gst": 1}) {
-		t.Errorf("after fill A: CostsAccum wrong: %v", acc.CostsAccum)
+	if !reflect.DeepEqual(accumulator.CostsAccum, map[string]int64{"stt": 2, "gst": 1}) {
+		t.Errorf("after fill A: CostsAccum wrong: %v", accumulator.CostsAccum)
 	}
 
 	inputB := RealizationInput{
@@ -68,22 +68,22 @@ func TestAccumulator_G8_PartialSellsAccumulateToOneRow(t *testing.T) {
 		ExitAt:      fillBTime,
 		Direction:   "long",
 	}
-	acc.fold(inputB, ComputeRealizedPnl(inputB))
+	accumulator.fold(inputB, ComputeRealizedPnl(inputB))
 
-	if acc.QtyClosed != 10 {
-		t.Errorf("after fill B: QtyClosed want 10, got %d", acc.QtyClosed)
+	if accumulator.QtyClosed != 10 {
+		t.Errorf("after fill B: QtyClosed want 10, got %d", accumulator.QtyClosed)
 	}
-	if acc.GrossAccum != 160 {
-		t.Errorf("after fill B: GrossAccum want 160, got %d", acc.GrossAccum)
+	if accumulator.GrossAccum != 160 {
+		t.Errorf("after fill B: GrossAccum want 160, got %d", accumulator.GrossAccum)
 	}
-	if acc.CostsTotal != 8 {
-		t.Errorf("after fill B: CostsTotal want 8, got %d", acc.CostsTotal)
+	if accumulator.CostsTotal != 8 {
+		t.Errorf("after fill B: CostsTotal want 8, got %d", accumulator.CostsTotal)
 	}
-	if !reflect.DeepEqual(acc.CostsAccum, map[string]int64{"stt": 5, "gst": 3}) {
-		t.Errorf("after fill B: CostsAccum wrong: %v", acc.CostsAccum)
+	if !reflect.DeepEqual(accumulator.CostsAccum, map[string]int64{"stt": 5, "gst": 3}) {
+		t.Errorf("after fill B: CostsAccum wrong: %v", accumulator.CostsAccum)
 	}
 
-	closed := acc.assemble("trade-1", ExitVoluntary)
+	closed := accumulator.assemble("trade-1", ExitVoluntary)
 
 	wantSummary := ParticipantTradeRow{
 		TradeID:      "trade-1",
@@ -133,7 +133,7 @@ func TestAccumulator_G9_MultiLotRoundTrip_WeightedAvgEntry(t *testing.T) {
 	entryB := time.Date(2026, 1, 15, 9, 30, 0, 0, time.UTC)
 	fillTime := time.Date(2026, 1, 15, 10, 0, 0, 0, time.UTC)
 
-	acc := &RealizationAccumulator{AccountID: "acct", SessionID: "sess", InstrumentID: "X"}
+	accumulator := &RealizationAccumulator{AccountID: "acct", SessionID: "sess", InstrumentID: "X"}
 	input := RealizationInput{
 		AccountID: "acct", SessionID: "sess", InstrumentID: "X",
 		FillQty:    20,
@@ -146,8 +146,8 @@ func TestAccumulator_G9_MultiLotRoundTrip_WeightedAvgEntry(t *testing.T) {
 		ExitAt:    fillTime,
 		Direction: "long",
 	}
-	acc.fold(input, ComputeRealizedPnl(input))
-	closed := acc.assemble("t-9", ExitVoluntary)
+	accumulator.fold(input, ComputeRealizedPnl(input))
+	closed := accumulator.assemble("t-9", ExitVoluntary)
 
 	if closed.Summary.EntryPrice != 110 {
 		t.Errorf("EntryPrice (weighted): want 110, got %d", closed.Summary.EntryPrice)
@@ -186,7 +186,7 @@ func TestAccumulator_G10_LossRoundTrip_SignedPnlPct(t *testing.T) {
 	entry := time.Date(2026, 1, 15, 9, 0, 0, 0, time.UTC)
 	exit := time.Date(2026, 1, 15, 11, 0, 0, 0, time.UTC)
 
-	acc := &RealizationAccumulator{AccountID: "a", SessionID: "s", InstrumentID: "Y"}
+	accumulator := &RealizationAccumulator{AccountID: "a", SessionID: "s", InstrumentID: "Y"}
 	input := RealizationInput{
 		FillQty:     10,
 		MakerPrice:  90,
@@ -195,8 +195,8 @@ func TestAccumulator_G10_LossRoundTrip_SignedPnlPct(t *testing.T) {
 		ExitAt:      exit,
 		Direction:   "long",
 	}
-	acc.fold(input, ComputeRealizedPnl(input))
-	closed := acc.assemble("t-10", ExitVoluntary)
+	accumulator.fold(input, ComputeRealizedPnl(input))
+	closed := accumulator.assemble("t-10", ExitVoluntary)
 
 	if closed.Summary.GrossPnl != -100 {
 		t.Errorf("GrossPnl: want -100, got %d", closed.Summary.GrossPnl)
@@ -217,7 +217,7 @@ func TestAccumulator_G11_AutoSquareExitReason_LinesGeneric(t *testing.T) {
 	entry := time.Date(2026, 1, 15, 9, 0, 0, 0, time.UTC)
 	exit := time.Date(2026, 1, 15, 15, 30, 0, 0, time.UTC)
 
-	acc := &RealizationAccumulator{AccountID: "a", SessionID: "s", InstrumentID: "Z"}
+	accumulator := &RealizationAccumulator{AccountID: "a", SessionID: "s", InstrumentID: "Z"}
 	input := RealizationInput{
 		FillQty:     10,
 		MakerPrice:  105,
@@ -229,8 +229,8 @@ func TestAccumulator_G11_AutoSquareExitReason_LinesGeneric(t *testing.T) {
 		ExitAt:    exit,
 		Direction: "long",
 	}
-	acc.fold(input, ComputeRealizedPnl(input))
-	closed := acc.assemble("t-11", ExitAutoSquare)
+	accumulator.fold(input, ComputeRealizedPnl(input))
+	closed := accumulator.assemble("t-11", ExitAutoSquare)
 
 	if closed.Summary.ExitReason != ExitAutoSquare {
 		t.Errorf("ExitReason: want auto_square, got %s", closed.Summary.ExitReason)
@@ -259,7 +259,7 @@ func TestAccumulator_G12_EmptyCostBreakdown(t *testing.T) {
 	entry := time.Date(2026, 1, 15, 9, 0, 0, 0, time.UTC)
 	exit := time.Date(2026, 1, 15, 10, 0, 0, 0, time.UTC)
 
-	acc := &RealizationAccumulator{AccountID: "a", SessionID: "s", InstrumentID: "W"}
+	accumulator := &RealizationAccumulator{AccountID: "a", SessionID: "s", InstrumentID: "W"}
 	input := RealizationInput{
 		FillQty:     5,
 		MakerPrice:  110,
@@ -268,8 +268,8 @@ func TestAccumulator_G12_EmptyCostBreakdown(t *testing.T) {
 		ExitAt:      exit,
 		Direction:   "long",
 	}
-	acc.fold(input, ComputeRealizedPnl(input))
-	closed := acc.assemble("t-12", ExitVoluntary)
+	accumulator.fold(input, ComputeRealizedPnl(input))
+	closed := accumulator.assemble("t-12", ExitVoluntary)
 
 	if closed.Summary.GrossPnl != 50 {
 		t.Errorf("GrossPnl: want 50, got %d", closed.Summary.GrossPnl)
@@ -294,7 +294,7 @@ func TestAccumulator_G12_EmptyCostBreakdown(t *testing.T) {
 func TestAccumulator_Fold_FirstNonEmptyTradeIDAndDirectionWin(t *testing.T) {
 	entry := time.Date(2026, 1, 15, 9, 0, 0, 0, time.UTC)
 
-	acc := &RealizationAccumulator{}
+	accumulator := &RealizationAccumulator{}
 
 	// Empty first fill leaves both fields empty.
 	inputEmpty := RealizationInput{
@@ -302,35 +302,35 @@ func TestAccumulator_Fold_FirstNonEmptyTradeIDAndDirectionWin(t *testing.T) {
 		MakerPrice:  100,
 		MatchedLots: []account.LotMatch{{EntryPrice: 100, Qty: 1, EntryAt: entry}},
 	}
-	acc.fold(inputEmpty, ComputeRealizedPnl(inputEmpty))
-	if acc.TradeID != "" {
-		t.Errorf("after empty fill: want acc.TradeID empty, got %q", acc.TradeID)
+	accumulator.fold(inputEmpty, ComputeRealizedPnl(inputEmpty))
+	if accumulator.TradeID != "" {
+		t.Errorf("after empty fill: want accumulator.TradeID empty, got %q", accumulator.TradeID)
 	}
-	if acc.Direction != "" {
-		t.Errorf("after empty fill: want acc.Direction empty, got %q", acc.Direction)
+	if accumulator.Direction != "" {
+		t.Errorf("after empty fill: want accumulator.Direction empty, got %q", accumulator.Direction)
 	}
 
 	// First non-empty values stick.
 	inputFirst := inputEmpty
 	inputFirst.TradeID = "T1"
 	inputFirst.Direction = "long"
-	acc.fold(inputFirst, ComputeRealizedPnl(inputFirst))
-	if acc.TradeID != "T1" {
-		t.Errorf("after T1/long: want acc.TradeID=T1, got %q", acc.TradeID)
+	accumulator.fold(inputFirst, ComputeRealizedPnl(inputFirst))
+	if accumulator.TradeID != "T1" {
+		t.Errorf("after T1/long: want accumulator.TradeID=T1, got %q", accumulator.TradeID)
 	}
-	if acc.Direction != "long" {
-		t.Errorf("after T1/long: want acc.Direction=long, got %q", acc.Direction)
+	if accumulator.Direction != "long" {
+		t.Errorf("after T1/long: want accumulator.Direction=long, got %q", accumulator.Direction)
 	}
 
 	// Later non-empty values do NOT overwrite.
 	inputLater := inputEmpty
 	inputLater.TradeID = "T2"
 	inputLater.Direction = "short"
-	acc.fold(inputLater, ComputeRealizedPnl(inputLater))
-	if acc.TradeID != "T1" {
-		t.Errorf("first-wins TradeID: want T1, got %q", acc.TradeID)
+	accumulator.fold(inputLater, ComputeRealizedPnl(inputLater))
+	if accumulator.TradeID != "T1" {
+		t.Errorf("first-wins TradeID: want T1, got %q", accumulator.TradeID)
 	}
-	if acc.Direction != "long" {
-		t.Errorf("first-wins Direction: want long, got %q", acc.Direction)
+	if accumulator.Direction != "long" {
+		t.Errorf("first-wins Direction: want long, got %q", accumulator.Direction)
 	}
 }
