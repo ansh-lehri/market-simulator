@@ -28,6 +28,25 @@ func (spy *spyPersistence) MarkSnapshotDirty(sessionID SessionID, accountID acco
 	spy.dirtyCalls = append(spy.dirtyCalls, dirtyCall{SessionID: sessionID, AccountID: accountID})
 }
 
+// spyCostModule is an in-memory CostModule for tests: returns pre-configured
+// CostBreakdowns and records every call so tests can assert on inputs.
+type spyCostModule struct {
+	fillReturns  cost.CostBreakdown
+	orderReturns cost.CostBreakdown
+	fillCalls    []cost.FillCostInput
+	orderCalls   []cost.OrderCostInput
+}
+
+func (spy *spyCostModule) ComputeFillCost(input cost.FillCostInput) cost.CostBreakdown {
+	spy.fillCalls = append(spy.fillCalls, input)
+	return spy.fillReturns
+}
+
+func (spy *spyCostModule) ComputeOrderCost(input cost.OrderCostInput) cost.CostBreakdown {
+	spy.orderCalls = append(spy.orderCalls, input)
+	return spy.orderReturns
+}
+
 // spyLedger is an in-memory AccountLedger for tests.
 type spyLedger struct {
 	accounts map[account.AccountID]*account.Account
@@ -76,7 +95,7 @@ func buildSellFill(
 func TestRealizer_G13_CanonicalGateFires(t *testing.T) {
 	ledger := newSpyLedger()
 	persist := &spyPersistence{}
-	realizer := NewRealizer(ledger, persist)
+	realizer := NewRealizer(ledger, persist, &spyCostModule{})
 
 	ledger.put(&account.Account{ID: "acct-1", PersistOnClose: true})
 
@@ -138,7 +157,7 @@ func TestRealizer_G13_CanonicalGateFires(t *testing.T) {
 func TestRealizer_G14_OnDemandGateSuppresses(t *testing.T) {
 	ledger := newSpyLedger()
 	persist := &spyPersistence{}
-	realizer := NewRealizer(ledger, persist)
+	realizer := NewRealizer(ledger, persist, &spyCostModule{})
 
 	ledger.put(&account.Account{ID: "acct-2", PersistOnClose: false})
 
@@ -178,7 +197,7 @@ func TestRealizer_G14_OnDemandGateSuppresses(t *testing.T) {
 func TestRealizer_G15_PersistOnCloseLockedAtBirth(t *testing.T) {
 	ledger := newSpyLedger()
 	persist := &spyPersistence{}
-	realizer := NewRealizer(ledger, persist)
+	realizer := NewRealizer(ledger, persist, &spyCostModule{})
 
 	acct := &account.Account{ID: "acct-3", PersistOnClose: true}
 	ledger.put(acct)
@@ -214,7 +233,7 @@ func TestRealizer_G15_PersistOnCloseLockedAtBirth(t *testing.T) {
 func TestRealizer_G16_TwoInstrumentsSameAccount(t *testing.T) {
 	ledger := newSpyLedger()
 	persist := &spyPersistence{}
-	realizer := NewRealizer(ledger, persist)
+	realizer := NewRealizer(ledger, persist, &spyCostModule{})
 
 	ledger.put(&account.Account{ID: "acct-4", PersistOnClose: true})
 
@@ -254,7 +273,7 @@ func TestRealizer_G16_TwoInstrumentsSameAccount(t *testing.T) {
 func TestRealizer_G17_ReopenAfterFlat(t *testing.T) {
 	ledger := newSpyLedger()
 	persist := &spyPersistence{}
-	realizer := NewRealizer(ledger, persist)
+	realizer := NewRealizer(ledger, persist, &spyCostModule{})
 
 	ledger.put(&account.Account{ID: "acct-5", PersistOnClose: true})
 
@@ -297,7 +316,7 @@ func TestRealizer_G17_ReopenAfterFlat(t *testing.T) {
 func TestRealizer_G18_PanicOnMissingAccount(t *testing.T) {
 	ledger := newSpyLedger()
 	persist := &spyPersistence{}
-	realizer := NewRealizer(ledger, persist)
+	realizer := NewRealizer(ledger, persist, &spyCostModule{})
 
 	defer func() {
 		if recovered := recover(); recovered == nil {
@@ -318,7 +337,7 @@ func TestRealizer_G18_PanicOnMissingAccount(t *testing.T) {
 func TestRealizer_UpstreamTradeIDPreferred(t *testing.T) {
 	ledger := newSpyLedger()
 	persist := &spyPersistence{}
-	realizer := NewRealizer(ledger, persist)
+	realizer := NewRealizer(ledger, persist, &spyCostModule{})
 
 	// Sentinel generator: if it ever runs, tests will notice.
 	realizer.nextTradeID = func() TradeID { return "GENERATOR-CALLED" }
