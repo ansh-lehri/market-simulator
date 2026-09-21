@@ -45,39 +45,39 @@ type RealizationAccumulator struct {
 // fold merges one per-fill realization into the round-trip accumulator.
 // Signed throughout; no clamping. Line names are pass-through from
 // result.Lines; values accumulate.
-func (acc *RealizationAccumulator) fold(input RealizationInput, result RealizationResult) {
-	acc.QtyClosed += input.FillQty
-	acc.GrossAccum += result.Gross
-	acc.CostsTotal += result.Costs
+func (accumulator *RealizationAccumulator) fold(input RealizationInput, result RealizationResult) {
+	accumulator.QtyClosed += input.FillQty
+	accumulator.GrossAccum += result.Gross
+	accumulator.CostsTotal += result.Costs
 
 	for name, amount := range result.Lines {
-		if acc.CostsAccum == nil {
-			acc.CostsAccum = map[string]int64{}
+		if accumulator.CostsAccum == nil {
+			accumulator.CostsAccum = map[string]int64{}
 		}
-		acc.CostsAccum[name] += amount
+		accumulator.CostsAccum[name] += amount
 	}
 
 	for _, matched := range input.MatchedLots {
-		acc.entryValueSum += matched.EntryPrice * matched.Qty
-		acc.entryQtySum += matched.Qty
-		if acc.FirstEntryAt.IsZero() || matched.EntryAt.Before(acc.FirstEntryAt) {
-			acc.FirstEntryAt = matched.EntryAt
+		accumulator.entryValueSum += matched.EntryPrice * matched.Qty
+		accumulator.entryQtySum += matched.Qty
+		if accumulator.FirstEntryAt.IsZero() || matched.EntryAt.Before(accumulator.FirstEntryAt) {
+			accumulator.FirstEntryAt = matched.EntryAt
 		}
 	}
 
-	acc.exitValueSum += input.MakerPrice * input.FillQty
-	acc.exitQtySum += input.FillQty
+	accumulator.exitValueSum += input.MakerPrice * input.FillQty
+	accumulator.exitQtySum += input.FillQty
 
-	if input.ExitAt.After(acc.ExitAt) {
-		acc.ExitAt = input.ExitAt
+	if input.ExitAt.After(accumulator.ExitAt) {
+		accumulator.ExitAt = input.ExitAt
 	}
 
-	if acc.TradeID == "" && input.TradeID != "" {
-		acc.TradeID = input.TradeID
+	if accumulator.TradeID == "" && input.TradeID != "" {
+		accumulator.TradeID = input.TradeID
 	}
 
-	if acc.Direction == "" && input.Direction != "" {
-		acc.Direction = input.Direction
+	if accumulator.Direction == "" && input.Direction != "" {
+		accumulator.Direction = input.Direction
 	}
 }
 
@@ -85,38 +85,38 @@ func (acc *RealizationAccumulator) fold(input RealizationInput, result Realizati
 // row plus itemized cost child, linked by tradeID. The Realizer supplies
 // tradeID (falling back to its generator if the accumulator never saw one)
 // and the exitReason (voluntary vs auto_square).
-func (acc *RealizationAccumulator) assemble(tradeID TradeID, exitReason ExitReason) ClosedTradeRow {
+func (accumulator *RealizationAccumulator) assemble(tradeID TradeID, exitReason ExitReason) ClosedTradeRow {
 	var entryPrice int64
-	if acc.entryQtySum > 0 {
-		entryPrice = acc.entryValueSum / acc.entryQtySum
+	if accumulator.entryQtySum > 0 {
+		entryPrice = accumulator.entryValueSum / accumulator.entryQtySum
 	}
 	var exitPrice int64
-	if acc.exitQtySum > 0 {
-		exitPrice = acc.exitValueSum / acc.exitQtySum
+	if accumulator.exitQtySum > 0 {
+		exitPrice = accumulator.exitValueSum / accumulator.exitQtySum
 	}
-	net := acc.GrossAccum - acc.CostsTotal
+	net := accumulator.GrossAccum - accumulator.CostsTotal
 
 	summary := ParticipantTradeRow{
 		TradeID:      tradeID,
-		AccountID:    acc.AccountID,
-		SessionID:    acc.SessionID,
-		InstrumentID: acc.InstrumentID,
-		Direction:    acc.Direction,
-		Quantity:     acc.QtyClosed,
+		AccountID:    accumulator.AccountID,
+		SessionID:    accumulator.SessionID,
+		InstrumentID: accumulator.InstrumentID,
+		Direction:    accumulator.Direction,
+		Quantity:     accumulator.QtyClosed,
 		EntryPrice:   entryPrice,
 		ExitPrice:    exitPrice,
-		EntryAt:      acc.FirstEntryAt,
-		ExitAt:       acc.ExitAt,
-		GrossPnl:     acc.GrossAccum,
-		TotalCosts:   acc.CostsTotal,
+		EntryAt:      accumulator.FirstEntryAt,
+		ExitAt:       accumulator.ExitAt,
+		GrossPnl:     accumulator.GrossAccum,
+		TotalCosts:   accumulator.CostsTotal,
 		NetPnl:       net,
-		PnlPct:       pnlPct(net, acc.entryValueSum),
+		PnlPct:       pnlPct(net, accumulator.entryValueSum),
 		ExitReason:   exitReason,
 	}
 	costChild := TradeCostRow{
 		TradeID: tradeID,
-		Lines:   acc.CostsAccum,
-		Total:   acc.CostsTotal,
+		Lines:   accumulator.CostsAccum,
+		Total:   accumulator.CostsTotal,
 	}
 	return ClosedTradeRow{Summary: summary, Cost: costChild}
 }
