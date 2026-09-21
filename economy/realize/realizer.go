@@ -6,6 +6,7 @@ import (
 
 	"simulator/contract"
 	"simulator/economy/account"
+	"simulator/economy/cost"
 )
 
 // accKey addresses one open round-trip: (account, instrument).
@@ -24,17 +25,22 @@ type Realizer struct {
 	book        map[accKey]*RealizationAccumulator
 	ledger      AccountLedger
 	persist     Persistence
+	costs       cost.CostModule
 	nextTradeID func() TradeID
 }
 
-// NewRealizer builds a Realizer wired to the given ledger and persistence
-// seam. The TradeID fallback generator defaults to a crypto/rand hex
-// string; tests may replace r.nextTradeID directly (same-package access).
-func NewRealizer(ledger AccountLedger, persist Persistence) *Realizer {
+// NewRealizer builds a Realizer wired to the given ledger, persistence
+// seam, and cost module. Costs is required — OnSellFill does not touch it
+// (voluntary-close costs arrive on RealizationInput.Cost), but
+// SettleSessionEnd calls ComputeFillCost / ComputeOrderCost itself.
+// The TradeID fallback generator defaults to a crypto/rand hex string;
+// tests may replace realizer.nextTradeID directly (same-package access).
+func NewRealizer(ledger AccountLedger, persist Persistence, costs cost.CostModule) *Realizer {
 	return &Realizer{
 		book:        map[accKey]*RealizationAccumulator{},
 		ledger:      ledger,
 		persist:     persist,
+		costs:       costs,
 		nextTradeID: defaultTradeIDGenerator,
 	}
 }
@@ -47,13 +53,13 @@ func NewRealizer(ledger AccountLedger, persist Persistence) *Realizer {
 //
 // Panics if the account is not in the ledger — that is a broken coupling
 // invariant, not a business error.
-func (r *Realizer) OnSellFill(input RealizationInput) {
+func (realizer *Realizer) OnSellFill(input RealizationInput) {
 	key := accKey{Account: input.AccountID, Instrument: input.InstrumentID}
 	result := ComputeRealizedPnl(input)
 
-	accumulator := r.book[key]
+	accumulator := realizer.book[key]
 	if accumulator == nil {
-		accountRecord := r.ledger.Get(input.AccountID)
+		accountRecord := realizer.ledger.Get(input.AccountID)
 		if accountRecord == nil {
 			panic(fmt.Sprintf("realize: OnSellFill for unknown account %q (instrument %q)",
 				input.AccountID, input.InstrumentID))
@@ -64,7 +70,7 @@ func (r *Realizer) OnSellFill(input RealizationInput) {
 			InstrumentID:   input.InstrumentID,
 			PersistOnClose: accountRecord.PersistOnClose,
 		}
-		r.book[key] = accumulator
+		realizer.book[key] = accumulator
 		slog.Debug("realize: accumulator born",
 			"account", input.AccountID,
 			"instrument", input.InstrumentID,
@@ -90,10 +96,10 @@ func (r *Realizer) OnSellFill(input RealizationInput) {
 
 	tradeID := accumulator.TradeID
 	if tradeID == "" {
-		tradeID = r.nextTradeID()
+		tradeID = realizer.nextTradeID()
 	}
 	closed := accumulator.assemble(tradeID, ExitVoluntary)
-	delete(r.book, key)
+	delete(realizer.book, key)
 
 	slog.Info("realize: round-trip flushed",
 		"account", input.AccountID,
@@ -112,7 +118,7 @@ func (r *Realizer) OnSellFill(input RealizationInput) {
 		return
 	}
 
-	r.persist.EnqueueClosedTrade(closed)
+	realizer.persist.EnqueueClosedTrade(closed)
 	slog.Info("realize: closed trade enqueued",
 		"account", input.AccountID,
 		"instrument", input.InstrumentID,
