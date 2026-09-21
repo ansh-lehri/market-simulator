@@ -44,7 +44,7 @@ func TestRealizer_G19_DeterminismReplay(t *testing.T) {
 		ledger.put(&account.Account{ID: "a2", PersistOnClose: true})
 
 		persist := &spyPersistence{}
-		realizer := NewRealizer(ledger, persist)
+		realizer := NewRealizer(ledger, persist, &spyCostModule{})
 
 		counter := 0
 		realizer.nextTradeID = func() TradeID {
@@ -91,7 +91,7 @@ func TestRealizer_DeterminismReplay_CostBreakdownIsolated(t *testing.T) {
 		ledger := newSpyLedger()
 		ledger.put(&account.Account{ID: "a1", PersistOnClose: true})
 		persist := &spyPersistence{}
-		realizer := NewRealizer(ledger, persist)
+		realizer := NewRealizer(ledger, persist, &spyCostModule{})
 		counter := 0
 		realizer.nextTradeID = func() TradeID {
 			counter++
