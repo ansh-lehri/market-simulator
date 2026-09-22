@@ -44,3 +44,24 @@ func (account *Account) ReadAvailablePosition(instrumentID contract.InstrumentID
 	}
 	return position.Available
 }
+
+// PositionFlat reports whether the participant currently holds NO units of
+// this instrument in EITHER bucket — Available + Reserved == 0. This is the
+// post-RemovePosition signal 5.2's Convert hands to 5.4's realizer as
+// RealizationInput.PositionNowFlat: a sell fill that empties both buckets
+// closes the round-trip and triggers the accumulator flush.
+//
+// Missing instrument → true: an account that never held the instrument is
+// trivially flat in it. Read-only; never allocates the Positions map on miss
+// (mirroring ReadAvailablePosition's discipline). Panics on a nil Account
+// for the same "ordering bug" reason as the other reads.
+func (account *Account) PositionFlat(instrumentID contract.InstrumentID) bool {
+	if account == nil {
+		panic("PositionFlat: working state not primed (order before session init)")
+	}
+	position, exists := account.Positions[instrumentID]
+	if !exists {
+		return true
+	}
+	return position.Available == 0 && position.Reserved == 0
+}
