@@ -102,12 +102,20 @@ type harness struct {
 }
 
 func newHarness() *harness {
+	return newHarnessWithCost(stubCostModule{})
+}
+
+// newHarnessWithCost builds a harness wired against a specific CostModule.
+// Stage-3+ tests use this to inject cost.NewIndiaCostModule(pinned rates)
+// so goldens can hand-verify per-line cost math; stage 2 uses the plain
+// newHarness() which defaults to the stubCostModule.
+func newHarnessWithCost(costs cost.CostModule) *harness {
 	ledger := newSpyLedger()
 	persist := newSpyPersistence()
 	events := newSpyEvents()
 	realiz := newSpyRealizer()
 	return &harness{
-		service: NewReservationService(ledger, stubCostModule{}, realiz, events, persist),
+		service: NewReservationService(ledger, costs, realiz, events, persist),
 		ledger:  ledger,
 		persist: persist,
 		events:  events,
