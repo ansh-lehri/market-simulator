@@ -1,0 +1,20 @@
+# 2026/09/22 08:52:05.580362 [TestProperty_CoreInvariant_LimitOrderLifecycle] [rapid] draw isSell: false
+# 2026/09/22 08:52:05.580415 [TestProperty_CoreInvariant_LimitOrderLifecycle] [rapid] draw origQty: 1
+# 2026/09/22 08:52:05.580435 [TestProperty_CoreInvariant_LimitOrderLifecycle] [rapid] draw limitPrice: 1
+# 2026/09/22 08:52:05.580491 [TestProperty_CoreInvariant_LimitOrderLifecycle] [rapid] draw op: 0
+# 2026/09/22 08:52:05.580503 [TestProperty_CoreInvariant_LimitOrderLifecycle] [rapid] draw fillQty: 1
+# 2026/09/22 08:52:05.580590 [TestProperty_CoreInvariant_LimitOrderLifecycle] terminal + never filled: brokerage count = 1, want 0
+# 
+v0.4.8#10606005585727310572
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
