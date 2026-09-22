@@ -209,3 +209,156 @@ func TestReadAvailablePosition_PanicsOnNilAccount(t *testing.T) {
 	var nilAccount *Account
 	_ = nilAccount.ReadAvailablePosition("ACME")
 }
+
+// -----------------------------------------------------------------------------
+// PositionFlat — post-RemovePosition signal for 5.2's Convert / 5.4's flush.
+// -----------------------------------------------------------------------------
+
+// Table-driven: exhaust the (Available, Reserved) truth table plus the two
+// missing-instrument shapes. Flat iff BOTH buckets are zero.
+func TestPositionFlat_TruthTable(t *testing.T) {
+	tests := []struct {
+		name    string
+		account *Account
+		lookup  contract.InstrumentID
+		want    bool
+	}{
+		{
+			name:    "missing instrument (empty map) is trivially flat",
+			account: &Account{Positions: map[contract.InstrumentID]*Position{}},
+			lookup:  "ACME",
+			want:    true,
+		},
+		{
+			name:    "missing instrument (nil map) is trivially flat",
+			account: &Account{}, // Positions nil
+			lookup:  "ACME",
+			want:    true,
+		},
+		{
+			name: "position present, both buckets zero — flat",
+			account: &Account{Positions: map[contract.InstrumentID]*Position{
+				"ACME": {Available: 0, Reserved: 0, OpenLots: nil},
+			}},
+			lookup: "ACME",
+			want:   true,
+		},
+		{
+			name: "Available positive, Reserved zero — NOT flat",
+			account: &Account{Positions: map[contract.InstrumentID]*Position{
+				"ACME": {Available: 1, Reserved: 0},
+			}},
+			lookup: "ACME",
+			want:   false,
+		},
+		{
+			name: "Available zero, Reserved positive — NOT flat",
+			account: &Account{Positions: map[contract.InstrumentID]*Position{
+				"ACME": {Available: 0, Reserved: 1},
+			}},
+			lookup: "ACME",
+			want:   false,
+		},
+		{
+			name: "both buckets positive — NOT flat",
+			account: &Account{Positions: map[contract.InstrumentID]*Position{
+				"ACME": {Available: 100, Reserved: 20},
+			}},
+			lookup: "ACME",
+			want:   false,
+		},
+		{
+			name: "lookup misses when other instrument holds units — flat in ACME",
+			account: &Account{Positions: map[contract.InstrumentID]*Position{
+				"OTHER": {Available: 50, Reserved: 0},
+			}},
+			lookup: "ACME",
+			want:   true,
+		},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := testCase.account.PositionFlat(testCase.lookup); got != testCase.want {
+				t.Errorf("PositionFlat(%q) = %v, want %v", testCase.lookup, got, testCase.want)
+			}
+		})
+	}
+}
+
+// A read never mutates. A missing-instrument PositionFlat must not
+// lazy-init the Positions map — nil-map identity must survive the read.
+func TestPositionFlat_DoesNotMutate(t *testing.T) {
+	tests := []struct {
+		name    string
+		account *Account
+		lookup  contract.InstrumentID
+	}{
+		{
+			name: "present instrument, flat",
+			account: &Account{Positions: map[contract.InstrumentID]*Position{
+				"ACME": {Available: 0, Reserved: 0},
+			}},
+			lookup: "ACME",
+		},
+		{
+			name: "present instrument, not flat",
+			account: &Account{Positions: map[contract.InstrumentID]*Position{
+				"ACME": {Available: 40, Reserved: 10},
+			}},
+			lookup: "ACME",
+		},
+		{
+			name:    "nil Positions map — must stay nil after miss",
+			account: &Account{},
+			lookup:  "MISSING",
+		},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			var beforePositions map[contract.InstrumentID]*Position
+			if testCase.account.Positions != nil {
+				beforePositions = make(map[contract.InstrumentID]*Position, len(testCase.account.Positions))
+				for key, value := range testCase.account.Positions {
+					snap := *value
+					beforePositions[key] = &snap
+				}
+			}
+			_ = testCase.account.PositionFlat(testCase.lookup)
+			if beforePositions == nil && testCase.account.Positions != nil {
+				t.Errorf("read allocated Positions map — expected nil to stay nil")
+			}
+			if len(beforePositions) != len(testCase.account.Positions) {
+				t.Errorf("Positions map size changed: got %d, want %d", len(testCase.account.Positions), len(beforePositions))
+			}
+			for key, wantPosition := range beforePositions {
+				gotPosition, exists := testCase.account.Positions[key]
+				if !exists {
+					t.Errorf("key %q dropped from Positions", key)
+					continue
+				}
+				if !reflect.DeepEqual(*gotPosition, *wantPosition) {
+					t.Errorf("Positions[%q] mutated: got %+v, want %+v", key, *gotPosition, *wantPosition)
+				}
+			}
+		})
+	}
+}
+
+func TestPositionFlat_PanicsOnNilAccount(t *testing.T) {
+	defer func() {
+		recovered := recover()
+		if recovered == nil {
+			t.Fatal("expected panic on nil Account, got none")
+		}
+		msg, ok := recovered.(string)
+		if !ok {
+			t.Fatalf("expected string panic, got %T: %v", recovered, recovered)
+		}
+		want := "PositionFlat: working state not primed (order before session init)"
+		if msg != want {
+			t.Errorf("panic msg = %q, want %q", msg, want)
+		}
+	}()
+	var nilAccount *Account
+	_ = nilAccount.PositionFlat("ACME")
+}
