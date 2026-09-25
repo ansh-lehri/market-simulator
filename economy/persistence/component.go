@@ -1,6 +1,8 @@
 package persistence
 
 import (
+	"context"
+
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 )
@@ -21,9 +23,10 @@ import (
 // buffer / pool; it does not touch the dirty map, so Phase 2 keeps its
 // lock-free single-writer discipline.
 type Component struct {
-	store *store
-	dirty map[dirtyKey]struct{}
-	cfg   Config
+	store   *store
+	dirty   map[dirtyKey]struct{}
+	cfg     Config
+	drainer *drainer
 }
 
 // DirtyKey is one entry from DrainDirty — the owner uses it to build a
@@ -50,9 +53,36 @@ func NewComponent(
 	cfg Config,
 ) *Component {
 	filled := cfg.withDefaults()
+	storeInstance := newStore(pool, redisClient, adapter, filled)
 	return &Component{
-		store: newStore(pool, redisClient, adapter, filled),
-		dirty: make(map[dirtyKey]struct{}),
-		cfg:   filled,
+		store:   storeInstance,
+		dirty:   make(map[dirtyKey]struct{}),
+		cfg:     filled,
+		drainer: newDrainer(storeInstance, filled),
 	}
+}
+
+// Start launches the closed-trade drainer goroutine (LAYER_5_PERSISTENCE
+// §5). Call at wiring root once Postgres + Redis are connected; return
+// error surfaces a double-start bug in the caller.
+//
+// The snapshotter stays synchronous / owner-driven in Phase 2 — Start does
+// NOT spawn a snapshotter goroutine. See snapshot_api.go / DrainDirty.
+func (component *Component) Start(ctx context.Context) error {
+	if component.drainer == nil {
+		// Tolerated only in tests that constructed a Component by hand
+		// without a drainer. Production always goes through NewComponent.
+		return nil
+	}
+	return component.drainer.Start(ctx)
+}
+
+// Stop signals the drainer goroutine to exit and waits for it. Idempotent
+// — safe to call from lifecycle shutdown even if Start was never called.
+// Un-drained rows stay in Redis for the next boot (D5).
+func (component *Component) Stop() {
+	if component.drainer == nil {
+		return
+	}
+	component.drainer.Stop()
 }
