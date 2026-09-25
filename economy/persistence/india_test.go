@@ -1,0 +1,166 @@
+package persistence
+
+import (
+	"errors"
+	"testing"
+)
+
+func TestIndiaAdapterFlattenPopulatesEveryColumn(t *testing.T) {
+	// Every India column appears in the returned map (schema §2.3), even for
+	// lines the caller did not supply. Total is carried through.
+	adapter := IndiaCostAdapter{}
+	columns, err := adapter.FlattenCostColumns(nil, 543)
+	if err != nil {
+		t.Fatalf("FlattenCostColumns: %v", err)
+	}
+
+	expectedColumns := []string{
+		indiaColumnBrokerage,
+		indiaColumnSTT,
+		indiaColumnExchange,
+		indiaColumnSEBI,
+		indiaColumnStamp,
+		indiaColumnGST,
+		indiaColumnAutosquareFee,
+		indiaColumnTotal,
+	}
+	for _, columnName := range expectedColumns {
+		if _, present := columns[columnName]; !present {
+			t.Errorf("column %q missing from output", columnName)
+		}
+	}
+	if columns[indiaColumnBrokerage] != 0 {
+		t.Errorf("brokerage: got %d, want 0 (D2)", columns[indiaColumnBrokerage])
+	}
+	if columns[indiaColumnTotal] != 543 {
+		t.Errorf("total: got %d, want 543", columns[indiaColumnTotal])
+	}
+}
+
+func TestIndiaAdapterFlattenMapsEveryLineToItsColumn(t *testing.T) {
+	// One row per allowlisted key, each in isolation, so the mapping is
+	// unambiguous.
+	cases := []struct {
+		lineName   string
+		columnName string
+	}{
+		{indiaLineSTT, indiaColumnSTT},
+		{indiaLineExchange, indiaColumnExchange},
+		{indiaLineSEBI, indiaColumnSEBI},
+		{indiaLineStamp, indiaColumnStamp},
+		{indiaLineGST, indiaColumnGST},
+		{indiaLineAutosquareFee, indiaColumnAutosquareFee},
+	}
+	adapter := IndiaCostAdapter{}
+	for _, testCase := range cases {
+		t.Run(testCase.lineName, func(subtest *testing.T) {
+			amount := int64(1234)
+			columns, err := adapter.FlattenCostColumns(
+				map[string]int64{testCase.lineName: amount},
+				amount,
+			)
+			if err != nil {
+				subtest.Fatalf("FlattenCostColumns: %v", err)
+			}
+			if got := columns[testCase.columnName]; got != amount {
+				subtest.Errorf("column %q: got %d, want %d", testCase.columnName, got, amount)
+			}
+			// Every other cost column stays 0.
+			for _, otherColumn := range []string{
+				indiaColumnSTT, indiaColumnExchange, indiaColumnSEBI,
+				indiaColumnStamp, indiaColumnGST, indiaColumnAutosquareFee,
+			} {
+				if otherColumn == testCase.columnName {
+					continue
+				}
+				if columns[otherColumn] != 0 {
+					subtest.Errorf("column %q leaked non-zero: %d", otherColumn, columns[otherColumn])
+				}
+			}
+		})
+	}
+}
+
+func TestIndiaAdapterFlattenFullStack(t *testing.T) {
+	// A realistic full India stack — every line populated at once.
+	lines := map[string]int64{
+		indiaLineSTT:           25,
+		indiaLineExchange:      3,
+		indiaLineSEBI:          1,
+		indiaLineStamp:         15,
+		indiaLineGST:           5,
+		indiaLineAutosquareFee: 5000,
+	}
+	total := int64(5049)
+	adapter := IndiaCostAdapter{}
+	columns, err := adapter.FlattenCostColumns(lines, total)
+	if err != nil {
+		t.Fatalf("FlattenCostColumns: %v", err)
+	}
+	if columns[indiaColumnSTT] != 25 ||
+		columns[indiaColumnExchange] != 3 ||
+		columns[indiaColumnSEBI] != 1 ||
+		columns[indiaColumnStamp] != 15 ||
+		columns[indiaColumnGST] != 5 ||
+		columns[indiaColumnAutosquareFee] != 5000 {
+		t.Errorf("full-stack mapping wrong: %+v", columns)
+	}
+	if columns[indiaColumnBrokerage] != 0 {
+		t.Errorf("brokerage should stay 0, got %d", columns[indiaColumnBrokerage])
+	}
+	if columns[indiaColumnTotal] != total {
+		t.Errorf("total: got %d, want %d", columns[indiaColumnTotal], total)
+	}
+}
+
+func TestIndiaAdapterFlattenUnknownLineIsAnError(t *testing.T) {
+	// D1: an unrecognized key is an error, not a silent drop. The seam layer
+	// (Stage 3) treats this as a programming bug at enqueue time.
+	adapter := IndiaCostAdapter{}
+	columns, err := adapter.FlattenCostColumns(
+		map[string]int64{"nse_fee": 100},
+		100,
+	)
+	if !errors.Is(err, ErrUnknownCostLine) {
+		t.Fatalf("expected ErrUnknownCostLine, got %v", err)
+	}
+	if columns != nil {
+		t.Errorf("on error, columns should be nil, got %+v", columns)
+	}
+}
+
+func TestIndiaAdapterFlattenUnknownAmongstKnownStillErrors(t *testing.T) {
+	// Map iteration order is random in Go; the unknown key may be hit first,
+	// middle, or last. Every case must surface as the error.
+	adapter := IndiaCostAdapter{}
+	_, err := adapter.FlattenCostColumns(
+		map[string]int64{
+			indiaLineSTT:      50,
+			indiaLineExchange: 3,
+			"unknown_key":     47,
+		},
+		100,
+	)
+	if !errors.Is(err, ErrUnknownCostLine) {
+		t.Fatalf("expected ErrUnknownCostLine, got %v", err)
+	}
+}
+
+func TestIndiaAdapterFlattenBrokerageInLinesIsUnknown(t *testing.T) {
+	// realize.TradeCostRow.Lines never carries "brokerage" (order-level,
+	// separate path — D2 + realize CLAUDE.md). If someone tries to smuggle
+	// it in, the India adapter treats it as an unknown key, not a silent
+	// pass-through. That's the safety valve.
+	adapter := IndiaCostAdapter{}
+	_, err := adapter.FlattenCostColumns(
+		map[string]int64{"brokerage": 2000},
+		2000,
+	)
+	if !errors.Is(err, ErrUnknownCostLine) {
+		t.Fatalf("expected ErrUnknownCostLine (brokerage never in trade_costs Lines), got %v", err)
+	}
+}
+
+// Compile-time assertion (belt + suspenders on top of the one in india.go):
+// IndiaCostAdapter satisfies CountryCostAdapter.
+var _ CountryCostAdapter = IndiaCostAdapter{}
