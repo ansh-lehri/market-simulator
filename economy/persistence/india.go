@@ -1,13 +1,14 @@
 package persistence
 
-import "fmt"
+import (
+	"context"
+	"fmt"
+)
 
 // India-specific cost-line names, as emitted by cost/india.go via
 // CostBreakdown.Lines. Persistence duplicates them (rather than importing
 // from cost) to keep the country-adapter self-contained; if they ever drift
 // from cost's, an integration test at Stage 5 will catch the mismatch.
-// A future refactor may host the canonical India strings in a shared
-// per-country package.
 const (
 	indiaLineSTT           = "stt"
 	indiaLineExchange      = "exchange"
@@ -30,6 +31,20 @@ const (
 	indiaColumnAutosquareFee = "autosquare_fee"
 	indiaColumnTotal         = "total"
 )
+
+// indiaTradeCostsTable is the trade_costs table name for India today
+// ("trade_costs" per schema §2.3). When schema §4's country-table split
+// lands, this stays "trade_costs" (India keeps the original table) and a
+// US adapter names its own table ("us_trade_costs").
+const indiaTradeCostsTable = "trade_costs"
+
+// indiaCostInsertSQL is the fixed INSERT statement for the India trade_costs
+// row. Column order matches the placeholders 1..9. Idempotent via
+// ON CONFLICT (trade_id) DO NOTHING so drainer replay is safe.
+const indiaCostInsertSQL = `INSERT INTO ` + indiaTradeCostsTable + ` (
+	trade_id, brokerage, stt, exchange, sebi, stamp, gst, autosquare_fee, total
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+ON CONFLICT (trade_id) DO NOTHING`
 
 // IndiaCostAdapter implements CountryCostAdapter for the India stack. Pure
 // value; no state.
@@ -73,4 +88,35 @@ func (IndiaCostAdapter) FlattenCostColumns(lines map[string]int64, total int64) 
 		}
 	}
 	return columns, nil
+}
+
+// InsertCostRow writes one India trade_costs row via the given executor.
+// FlattenCostColumns validates the map first; any unknown key surfaces as
+// ErrUnknownCostLine and no SQL is issued.
+func (adapter IndiaCostAdapter) InsertCostRow(
+	ctx context.Context,
+	executor CostRowExecutor,
+	tradeID string,
+	lines map[string]int64,
+	total int64,
+) error {
+	columns, err := adapter.FlattenCostColumns(lines, total)
+	if err != nil {
+		return err
+	}
+	_, err = executor.Exec(ctx, indiaCostInsertSQL,
+		tradeID,
+		columns[indiaColumnBrokerage],
+		columns[indiaColumnSTT],
+		columns[indiaColumnExchange],
+		columns[indiaColumnSEBI],
+		columns[indiaColumnStamp],
+		columns[indiaColumnGST],
+		columns[indiaColumnAutosquareFee],
+		columns[indiaColumnTotal],
+	)
+	if err != nil {
+		return fmt.Errorf("persistence: india InsertCostRow %s: %w", tradeID, err)
+	}
+	return nil
 }
