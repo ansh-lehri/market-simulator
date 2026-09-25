@@ -1,8 +1,11 @@
 package persistence
 
 import (
+	"context"
 	"errors"
 	"testing"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 func TestIndiaAdapterFlattenPopulatesEveryColumn(t *testing.T) {
@@ -164,3 +167,63 @@ func TestIndiaAdapterFlattenBrokerageInLinesIsUnknown(t *testing.T) {
 // Compile-time assertion (belt + suspenders on top of the one in india.go):
 // IndiaCostAdapter satisfies CountryCostAdapter.
 var _ CountryCostAdapter = IndiaCostAdapter{}
+
+// fakeCostRowExecutor records the last Exec call for unit-level assertions
+// on InsertCostRow (no DB needed).
+type fakeCostRowExecutor struct {
+	gotSQL  string
+	gotArgs []any
+	err     error
+}
+
+func (f *fakeCostRowExecutor) Exec(_ context.Context, sql string, arguments ...any) (pgconn.CommandTag, error) {
+	f.gotSQL = sql
+	f.gotArgs = arguments
+	return pgconn.CommandTag{}, f.err
+}
+
+func TestIndiaAdapterInsertCostRowIssuesFixedSQL(t *testing.T) {
+	// The India adapter's InsertCostRow writes a fixed 9-column INSERT
+	// targeting the India trade_costs table. Args are (trade_id, brokerage,
+	// stt, exchange, sebi, stamp, gst, autosquare_fee, total).
+	fake := &fakeCostRowExecutor{}
+	err := IndiaCostAdapter{}.InsertCostRow(context.Background(), fake, "trd-1",
+		map[string]int64{indiaLineSTT: 25, indiaLineGST: 5}, 30)
+	if err != nil {
+		t.Fatalf("InsertCostRow: %v", err)
+	}
+	if fake.gotSQL == "" {
+		t.Fatal("expected some SQL, got empty")
+	}
+	if len(fake.gotArgs) != 9 {
+		t.Fatalf("args len: got %d, want 9", len(fake.gotArgs))
+	}
+	if fake.gotArgs[0] != "trd-1" {
+		t.Errorf("arg 0 (trade_id): got %v, want trd-1", fake.gotArgs[0])
+	}
+	if fake.gotArgs[1].(int64) != 0 {
+		t.Errorf("arg 1 (brokerage): got %v, want 0 (D2)", fake.gotArgs[1])
+	}
+	if fake.gotArgs[2].(int64) != 25 {
+		t.Errorf("arg 2 (stt): got %v, want 25", fake.gotArgs[2])
+	}
+	if fake.gotArgs[6].(int64) != 5 {
+		t.Errorf("arg 6 (gst): got %v, want 5", fake.gotArgs[6])
+	}
+	if fake.gotArgs[8].(int64) != 30 {
+		t.Errorf("arg 8 (total): got %v, want 30", fake.gotArgs[8])
+	}
+}
+
+func TestIndiaAdapterInsertCostRowUnknownKeyErrorsBeforeSQL(t *testing.T) {
+	// D1: unknown key error must fire BEFORE any SQL is issued.
+	fake := &fakeCostRowExecutor{}
+	err := IndiaCostAdapter{}.InsertCostRow(context.Background(), fake, "trd-1",
+		map[string]int64{"nse_fee": 100}, 100)
+	if !errors.Is(err, ErrUnknownCostLine) {
+		t.Fatalf("expected ErrUnknownCostLine, got %v", err)
+	}
+	if fake.gotSQL != "" {
+		t.Errorf("SQL was issued despite unknown key: %s", fake.gotSQL)
+	}
+}
