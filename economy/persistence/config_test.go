@@ -14,6 +14,9 @@ func TestConfigWithDefaultsFillsZeros(t *testing.T) {
 	if filled.DrainerBatch != 64 {
 		t.Errorf("DrainerBatch default: got %d, want 64", filled.DrainerBatch)
 	}
+	if filled.EnqueueTimeout != time.Second {
+		t.Errorf("EnqueueTimeout default: got %v, want 1s", filled.EnqueueTimeout)
+	}
 	if filled.TimeEncoding != TimeRFC3339 {
 		t.Errorf("TimeEncoding default: got %d, want %d (TimeRFC3339)", filled.TimeEncoding, TimeRFC3339)
 	}
@@ -30,11 +33,12 @@ func TestConfigWithDefaultsPreservesOverrides(t *testing.T) {
 	_ = drainerProgress // keep the local for readability alongside other tests
 
 	original := Config{
-		DrainerTick:  500 * time.Millisecond,
-		DrainerBatch: 128,
-		TimeEncoding: TimeUnixNano,
-		SideEncoding: SideInt,
-		KeyNamespace: "test_ns",
+		DrainerTick:    500 * time.Millisecond,
+		DrainerBatch:   128,
+		EnqueueTimeout: 2 * time.Second,
+		TimeEncoding:   TimeUnixNano,
+		SideEncoding:   SideInt,
+		KeyNamespace:   "test_ns",
 	}
 	filled := original.withDefaults()
 
