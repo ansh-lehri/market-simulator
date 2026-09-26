@@ -83,8 +83,8 @@ type Bundle struct {
 // failure Wire closes what it already opened and returns a wrapped
 // error — a partial Bundle never escapes.
 //
-// Stage 3: infra + persistence.Component (with the drainer goroutine
-// running). Compute / lifecycle land in stages 4–5.
+// Stage 4: infra + persistence.Component + compute (cost, ledger,
+// realize, reserve). Lifecycle lands in stage 5.
 func Wire(ctx context.Context, opts Options) (*Bundle, error) {
 	pool, err := db.NewPostgres(ctx, opts.ConnConfig.Postgres)
 	if err != nil {
@@ -126,10 +126,42 @@ func Wire(ctx context.Context, opts Options) (*Bundle, error) {
 		"redis_namespace", opts.RedisNamespace,
 	)
 
+	// ---- compute stack ---------------------------------------------------
+	// Ledger is the capstone-local *Account registry (stand-in for the
+	// broker funnel's owner-side registry). Empty at construction; the
+	// caller Puts a *Account into it after every session_load.
+	ledger := newMemoryLedger()
+
+	// Realize MUST be built before reserve — reserve takes it as its
+	// RealizerHandoff (called from Convert's sell branch). Both take the
+	// SAME *persistence.Component: for realize it satisfies the full
+	// Persistence interface (MarkSnapshotDirty + EnqueueClosedTrade); for
+	// reserve it satisfies the narrower one (MarkSnapshotDirty only).
+	// Structural typing — no adapter, no wrapper.
+	realizer := realize.NewRealizer(ledger, component, opts.Cost)
+
+	// Reserve is the top of the compute stack. Every collaborator is
+	// injected: ledger, cost module, realizer (RealizerHandoff), events
+	// (nop stand-in — the event system is deferred), and the persistence
+	// seam (same *Component again).
+	reserveService := reserve.NewReservationService(
+		ledger,
+		opts.Cost,
+		realizer,
+		nopEvents{},
+		component,
+	)
+
+	slog.Info("capstone.Wire: compute wired")
+
 	return &Bundle{
-		Pool:    pool,
-		Redis:   client,
-		Persist: component,
+		Pool:     pool,
+		Redis:    client,
+		Persist:  component,
+		Cost:     opts.Cost,
+		Ledger:   ledger,
+		Realizer: realizer,
+		Reserve:  reserveService,
 	}, nil
 }
 
