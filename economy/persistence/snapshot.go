@@ -148,12 +148,17 @@ func (component *store) writeSnapshot(ctx context.Context, payload SnapshotPaylo
 
 // ---- read path -------------------------------------------------------------
 
-// readSnapshot reads ONE account's snapshot from Redis. Returns a zero-value
-// SnapshotPayload with the ids populated if the cash key is missing (an
-// account with nothing snapshotted yet is not an error — it just has empty
-// state). Positions/reservations arrive in Redis SCAN order, which is not
+// readSnapshot reads ONE account's snapshot from Redis. Returns
+// ErrSnapshotMissing with the ids-populated payload if the cash key is
+// absent — the load-bearing seed key. Lifecycle uses that sentinel to
+// distinguish "no snapshot" from a zero-valued snapshot (a brand-new
+// session with zero capital would otherwise look identical to missing).
+//
+// Positions and reservations arrive in Redis SCAN order, which is not
 // deterministic across runs; callers must not depend on iteration order.
 // OpenLots FIFO order INSIDE a position is preserved by the JSON array.
+// Mid-scan position/reservation absence (key vanished between SCAN and
+// GET) stays a non-fatal race and is skipped internally.
 func (component *store) readSnapshot(ctx context.Context, sessionID, accountID string) (SnapshotPayload, error) {
 	slog.Debug("persistence: readSnapshot", "session_id", sessionID, "account_id", accountID)
 
@@ -162,7 +167,7 @@ func (component *store) readSnapshot(ctx context.Context, sessionID, accountID s
 	cashRaw, cashErr := component.redis.Get(ctx, cashKey(component.cfg.KeyNamespace, sessionID, accountID)).Bytes()
 	switch {
 	case errors.Is(cashErr, redis.Nil):
-		// Missing cash key → account not snapshotted; return empty payload.
+		return payload, ErrSnapshotMissing
 	case cashErr != nil:
 		return payload, fmt.Errorf("persistence: readSnapshot cash: %w", cashErr)
 	default:
