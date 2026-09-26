@@ -21,7 +21,13 @@ import (
 //  2. Assert flat — auto-square must have zeroed positions and released
 //     every reservation. Reserved != 0 → panic. Any live position → panic.
 //     Non-flat at save = ordering bug (dev-fatal).
-//  3. Reconcile — trading_cash(durable) = Available + Settled. Bank / drip
+//  3. Reconcile — trading_cash(durable) = Available + Reserved. At save
+//     time Reserved is asserted 0 (flat check), so this reduces to
+//     Available; the formula is still written as Available + Reserved
+//     because that IS the trading_cash definition at any moment (see
+//     [[settled-semantics]]). Settled is a session-only bucket, NOT part
+//     of trading_cash — it accumulates buy-side Reserved→Settled
+//     conversions during the session and is ignored at save. Bank / drip
 //     carry over. This is the ONLY money math lifecycle does.
 //  4. SaveAccount (one Postgres UPDATE, atomic inside persistence).
 //     Failure → ErrSaveFailedFor. CRITICAL: do NOT discard the snapshot on
@@ -49,9 +55,12 @@ func (service *Service) SessionSave(ctx context.Context, sessionID string, loade
 	// broke (auto-square did not run, or a resting order survived it).
 	assertFlatOrPanic(loaded.Account)
 
-	// Step 3 — reconcile. Available may be negative (Option B); Settled
-	// is >= 0. Their sum is the final signed trading_cash.
-	finalTradingCash := loaded.Account.Cash.Available + loaded.Account.Cash.Settled
+	// Step 3 — reconcile. Available may be negative (Option B); Reserved
+	// is asserted 0 above (flat check). The sum is the final signed
+	// trading_cash. Settled is deliberately excluded — it is a session-
+	// only accounting bucket for Reserved→position conversions and is
+	// NOT part of trading_cash (see [[settled-semantics]]).
+	finalTradingCash := loaded.Account.Cash.Available + loaded.Account.Cash.Reserved
 
 	durable := persistence.DurableAccount{
 		AccountID:    loaded.Account.ID,
