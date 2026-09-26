@@ -30,7 +30,11 @@ func (component *Component) WriteSnapshot(ctx context.Context, payload SnapshotP
 // ReadSnapshot reads ONE account's snapshot back from Redis. Used by
 // LAYER_5_1_READ_OPERATIONS item 16 (read_balance_snapshot) and by
 // crash-recovery load at session start (before Postgres is consulted).
-// Missing keys return a zero-value payload (not an error).
+//
+// A missing cash key returns ErrSnapshotMissing (with the ids-populated
+// payload); any other Redis / decode error is wrapped. Callers use
+// errors.Is(err, ErrSnapshotMissing) to distinguish "no snapshot at all"
+// from a legitimately-zero snapshot and from transport failure.
 func (component *Component) ReadSnapshot(ctx context.Context, sessionID, accountID string) (SnapshotPayload, error) {
 	return component.store.readSnapshot(ctx, sessionID, accountID)
 }
