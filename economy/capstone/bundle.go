@@ -34,12 +34,24 @@ type Options struct {
 	// isolate namespaces from prod and from parallel runs.
 	RedisNamespace string
 
-	// IndiaRates is the injected cost rulebook. Injected — not
-	// hardcoded in this package — because the rulebook home is
-	// undecided (see [[project_broker_rulebook_injection_tbd]]). The
-	// capstone test supplies a fixture matching
-	// [[project_india_rate_locks]].
-	IndiaRates cost.IndiaRates
+	// Cost is the pre-built cost module for the country stack this
+	// wiring composes against. Caller instantiates it — e.g.
+	// cost.NewIndiaCostModule(indiaRates) — and hands the interface
+	// value here. This package holds NO country-specific rate/rulebook
+	// shape; every country-specific rate name and mechanic stays inside
+	// the country module (per feedback_country_specifics_stay_country_specific).
+	Cost cost.CostModule
+
+	// CostAdapter is the pre-built country adapter persistence hands to
+	// the SQL layer to flatten a CostBreakdown's country-keyed Lines
+	// map into that country's trade_costs column layout. Same
+	// injection pattern as Cost; wiring never mentions a country here.
+	//
+	// Correlation invariant (caller-enforced, not checked here):
+	// CostAdapter MUST match Cost's country — an India cost module
+	// with a US adapter would route India line names into US columns
+	// and fail as ErrUnknownCostLine at first EnqueueClosedTrade.
+	CostAdapter persistence.CountryCostAdapter
 }
 
 // Bundle is every wired handle the capstone (and, later, a real cmd/
@@ -71,8 +83,8 @@ type Bundle struct {
 // failure Wire closes what it already opened and returns a wrapped
 // error — a partial Bundle never escapes.
 //
-// Stage 2: infra (Postgres + Redis) only. Persistence / compute /
-// lifecycle land in stages 3–5.
+// Stage 3: infra + persistence.Component (with the drainer goroutine
+// running). Compute / lifecycle land in stages 4–5.
 func Wire(ctx context.Context, opts Options) (*Bundle, error) {
 	pool, err := db.NewPostgres(ctx, opts.ConnConfig.Postgres)
 	if err != nil {
@@ -90,9 +102,34 @@ func Wire(ctx context.Context, opts Options) (*Bundle, error) {
 		"redis_namespace", opts.RedisNamespace,
 	)
 
+	// persistence.Config: only KeyNamespace is caller-controlled. The
+	// remaining fields (DrainerTick / DrainerBatch / EnqueueTimeout /
+	// TimeEncoding / SideEncoding) stay zero-valued so withDefaults
+	// applies the operational defaults (100 ms / 64 / 1 s / RFC3339 /
+	// string). Persistence stores the filled config internally; we
+	// keep our copy minimal and let that be the source of truth.
+	persistCfg := persistence.Config{
+		KeyNamespace: opts.RedisNamespace,
+	}
+	component := persistence.NewComponent(pool, client, opts.CostAdapter, persistCfg)
+	if err := component.Start(ctx); err != nil {
+		// Rollback in LIFO order: nothing to stop on Component (Start
+		// failed before spawning the drainer), then Redis, then Pool.
+		if closeErr := client.Close(); closeErr != nil {
+			slog.Warn("capstone.Wire: redis close error during rollback (non-fatal)", "cause", closeErr)
+		}
+		pool.Close()
+		return nil, fmt.Errorf("capstone.Wire: persistence.Start: %w", err)
+	}
+
+	slog.Info("capstone.Wire: persistence started",
+		"redis_namespace", opts.RedisNamespace,
+	)
+
 	return &Bundle{
-		Pool:  pool,
-		Redis: client,
+		Pool:    pool,
+		Redis:   client,
+		Persist: component,
 	}, nil
 }
 
@@ -103,10 +140,16 @@ func Wire(ctx context.Context, opts Options) (*Bundle, error) {
 // sequence, and a caller's defer-Close never panics on a nil or
 // twice-closed handle.
 //
-// Stage 2: closes Postgres + Redis. Stage 3 prepends drainer.Stop.
+// Stage 3: stops the drainer, then closes Redis + Postgres.
 func (bundle *Bundle) Close() {
 	if bundle == nil {
 		return
+	}
+	if bundle.Persist != nil {
+		// Idempotent by contract (persistence/component.go). Stopping
+		// before the Redis/Postgres close so the drainer's final tick
+		// never lands on a closed handle.
+		bundle.Persist.Stop()
 	}
 	if bundle.Redis != nil {
 		if err := bundle.Redis.Close(); err != nil {
