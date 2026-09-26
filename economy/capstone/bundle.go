@@ -83,8 +83,9 @@ type Bundle struct {
 // failure Wire closes what it already opened and returns a wrapped
 // error — a partial Bundle never escapes.
 //
-// Stage 4: infra + persistence.Component + compute (cost, ledger,
-// realize, reserve). Lifecycle lands in stage 5.
+// Stage 5: full stack — infra + persistence.Component + compute (cost,
+// ledger, realize, reserve) + lifecycle. Wire is complete after this
+// stage; capstone tests can drive the whole loop end-to-end.
 func Wire(ctx context.Context, opts Options) (*Bundle, error) {
 	pool, err := db.NewPostgres(ctx, opts.ConnConfig.Postgres)
 	if err != nil {
@@ -154,14 +155,28 @@ func Wire(ctx context.Context, opts Options) (*Bundle, error) {
 
 	slog.Info("capstone.Wire: compute wired")
 
+	// ---- lifecycle -------------------------------------------------------
+	// Session-boundary orchestration. Takes the SAME *persistence.Component
+	// as its store — *Component satisfies lifecycle's unexported store
+	// interface (OpenAccount / LoadAccount / SaveAccount / WriteSnapshot /
+	// ReadSnapshot / DeleteSnapshot), verified at compile time inside
+	// economy/lifecycle/service.go. Stateless — no goroutine, no handle,
+	// nothing for Close to tear down.
+	lifecycleService := lifecycle.NewService(component)
+
+	slog.Info("capstone.Wire: ready",
+		"redis_namespace", opts.RedisNamespace,
+	)
+
 	return &Bundle{
-		Pool:     pool,
-		Redis:    client,
-		Persist:  component,
-		Cost:     opts.Cost,
-		Ledger:   ledger,
-		Realizer: realizer,
-		Reserve:  reserveService,
+		Pool:      pool,
+		Redis:     client,
+		Persist:   component,
+		Cost:      opts.Cost,
+		Ledger:    ledger,
+		Realizer:  realizer,
+		Reserve:   reserveService,
+		Lifecycle: lifecycleService,
 	}, nil
 }
 
@@ -172,7 +187,9 @@ func Wire(ctx context.Context, opts Options) (*Bundle, error) {
 // sequence, and a caller's defer-Close never panics on a nil or
 // twice-closed handle.
 //
-// Stage 3: stops the drainer, then closes Redis + Postgres.
+// Sequence: drainer.Stop -> Redis close -> Postgres close. Compute
+// types (Cost/Ledger/Realizer/Reserve/Lifecycle) hold no resources and
+// need no teardown here.
 func (bundle *Bundle) Close() {
 	if bundle == nil {
 		return
