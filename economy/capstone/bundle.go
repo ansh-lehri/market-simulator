@@ -2,12 +2,14 @@ package capstone
 
 import (
 	"context"
-	"errors"
+	"fmt"
+	"log/slog"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
 	"simulator/connectivity/config"
+	"simulator/connectivity/db"
 	"simulator/economy/cost"
 	"simulator/economy/lifecycle"
 	"simulator/economy/persistence"
@@ -69,9 +71,29 @@ type Bundle struct {
 // failure Wire closes what it already opened and returns a wrapped
 // error — a partial Bundle never escapes.
 //
-// Stage 1: skeleton only. Stages 2–5 fill this in.
+// Stage 2: infra (Postgres + Redis) only. Persistence / compute /
+// lifecycle land in stages 3–5.
 func Wire(ctx context.Context, opts Options) (*Bundle, error) {
-	return nil, errors.New("capstone.Wire: not implemented (stage 1 skeleton)")
+	pool, err := db.NewPostgres(ctx, opts.ConnConfig.Postgres)
+	if err != nil {
+		return nil, fmt.Errorf("capstone.Wire: postgres: %w", err)
+	}
+
+	client, err := db.NewRedis(ctx, opts.ConnConfig.Redis)
+	if err != nil {
+		// Rollback: close what we already opened before returning.
+		pool.Close()
+		return nil, fmt.Errorf("capstone.Wire: redis: %w", err)
+	}
+
+	slog.Info("capstone.Wire: infra opened",
+		"redis_namespace", opts.RedisNamespace,
+	)
+
+	return &Bundle{
+		Pool:  pool,
+		Redis: client,
+	}, nil
 }
 
 // Close tears the bundle down in reverse dependency order (LIFO): stop
@@ -81,9 +103,17 @@ func Wire(ctx context.Context, opts Options) (*Bundle, error) {
 // sequence, and a caller's defer-Close never panics on a nil or
 // twice-closed handle.
 //
-// Stage 1: no-op skeleton. Stages 2–3 add the real teardown.
+// Stage 2: closes Postgres + Redis. Stage 3 prepends drainer.Stop.
 func (bundle *Bundle) Close() {
 	if bundle == nil {
 		return
+	}
+	if bundle.Redis != nil {
+		if err := bundle.Redis.Close(); err != nil {
+			slog.Warn("capstone.Close: redis close error (non-fatal)", "cause", err)
+		}
+	}
+	if bundle.Pool != nil {
+		bundle.Pool.Close()
 	}
 }
