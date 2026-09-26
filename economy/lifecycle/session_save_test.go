@@ -30,23 +30,27 @@ func flatCanonicalLoaded(accountID account.AccountID, available, settled, bank i
 	}
 }
 
-// TestSessionSaveReconciliation covers Available + Settled → TradingCash
-// across positive / zero / negative results (signed round-trip, Option 4).
+// TestSessionSaveReconciliation covers Available + Reserved → TradingCash
+// across positive / zero / negative Available (signed round-trip,
+// Option 4). Per [[settled-semantics]], Reserved is asserted 0 at save
+// time (flat check), so the sum collapses to Available. Settled is
+// deliberately excluded from the sum — this table seeds arbitrary Settled
+// values to prove they are IGNORED.
 func TestSessionSaveReconciliation(t *testing.T) {
 	cases := []struct {
-		name             string
-		available        int64
-		settled          int64
-		bank             int64
-		wantTradingCash  int64
+		name            string
+		available       int64
+		settled         int64 // arbitrary — must NOT influence TradingCash
+		bank            int64
+		wantTradingCash int64 // == available (Reserved asserted 0; Settled ignored)
 	}{
-		{"positive available + positive settled", 1_000_000, 250_000, 100_000, 1_250_000},
-		{"positive available + zero settled", 750_000, 0, 50_000, 750_000},
-		{"zero available + positive settled (all realized)", 0, 500_000, 42, 500_000},
-		{"available zero, settled zero (flat zero account)", 0, 0, 0, 0},
-		{"negative available, positive settled netting to positive", -100_000, 300_000, 50, 200_000},
-		{"negative available, positive settled netting to zero", -500_000, 500_000, 0, 0},
-		{"negative available, small settled netting to negative (debt)", -1_000_000, 100_000, 0, -900_000},
+		{"positive available, settled ignored", 1_000_000, 250_000, 100_000, 1_000_000},
+		{"positive available, zero settled", 750_000, 0, 50_000, 750_000},
+		{"zero available, positive settled ignored", 0, 500_000, 42, 0},
+		{"all zeros (flat zero account)", 0, 0, 0, 0},
+		{"negative available (debt), positive settled ignored", -900_000, 500_000, 50, -900_000},
+		{"negative available, zero settled", -1_000_000, 0, 0, -1_000_000},
+		{"deeply negative available, settled ignored", -777_777, 999_999, 0, -777_777},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(subtest *testing.T) {
@@ -62,7 +66,7 @@ func TestSessionSaveReconciliation(t *testing.T) {
 			}
 			saved := fake.SaveAccountCalls[0]
 			if saved.TradingCash != testCase.wantTradingCash {
-				subtest.Errorf("TradingCash: got %d, want %d (Available %d + Settled %d)",
+				subtest.Errorf("TradingCash: got %d, want %d (Available %d + Reserved 0; Settled %d IGNORED)",
 					saved.TradingCash, testCase.wantTradingCash, testCase.available, testCase.settled)
 			}
 			if saved.BankCash != testCase.bank {
