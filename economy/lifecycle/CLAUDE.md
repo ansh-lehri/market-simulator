@@ -54,8 +54,11 @@ policy; it holds **no SQL** and touches **no driver**.
   then evolves in memory; `crash_recovery_reload` *restores* an evolved split, it does not
   re-synthesize).
 - **Reconciliation (save, section 5, Decision-7):** at clean close the session is flat, so
-  **`Reserved == 0` (assert; panic if not)** and **`trading_cash(durable) = Available + Settled`**.
-  `bank`/drip carry over. This is the ONLY money math lifecycle does.
+  **`Reserved == 0` (assert; panic if not)** and **`trading_cash(durable) = Available + Reserved`**
+  (which collapses to `Available` at save time given the assertion). **`Settled` is deliberately
+  excluded** — it is a session-only accounting bucket that tracks Reserved→position conversions on
+  buy fills; it accumulates during the session, is ignored at save, and reseeds to 0 at the next
+  `SessionLoad`. `bank`/drip carry over. This is the ONLY money math lifecycle does.
 - **Ordering (load-bearing):** auto-square (5.4) -> trades flushed -> **THEN `session_save`**. Save is
   the last teardown step; asserts flat (`Reserved==0`, no live position -> **panic**).
 - **On-demand guard:** `session_save` on `PersistOnClose==false` -> `ErrNotCanonical` (refuse; never
@@ -95,7 +98,7 @@ policy; it holds **no SQL** and touches **no driver**.
 
 ## Tests
 - **Unit (no DB) for the pure logic:** the hydration split synthesis; the save reconciliation
-  (`Available + Settled`, `Reserved==0`); the flat-precondition **panics** (reserved cash / unsquared
+  (`Available + Reserved`, `Reserved==0` → collapses to `Available`; Settled ignored); the flat-precondition **panics** (reserved cash / unsquared
   position at save); the on-demand `ErrNotCanonical` guard; the `read_16` payload->`*Cash` mapping and
   its two error branches (with a fake Component).
 - **Integration through the REAL `persistence.Component` against `l5_test`** (tx-rollback per test;
