@@ -2,6 +2,7 @@ package persistence
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"sort"
@@ -219,10 +220,12 @@ func TestSnapshotDeleteRemovesAllThreeKeyGroups(t *testing.T) {
 	}
 
 	got, err := sto.readSnapshot(context.Background(), original.SessionID, original.AccountID)
-	if err != nil {
-		t.Fatalf("readSnapshot after delete: %v", err)
+	if !errors.Is(err, ErrSnapshotMissing) {
+		t.Fatalf("readSnapshot after delete: err = %v, want ErrSnapshotMissing", err)
 	}
-	// Cash empty (Available/Reserved/... all zero, DripProgress nil).
+	if got.SessionID != original.SessionID || got.AccountID != original.AccountID {
+		t.Errorf("readSnapshot: ids not populated on ErrSnapshotMissing: %+v", got)
+	}
 	if got.Cash != (CashSnap{}) {
 		t.Errorf("Cash not cleared after delete: %+v", got.Cash)
 	}
@@ -234,21 +237,59 @@ func TestSnapshotDeleteRemovesAllThreeKeyGroups(t *testing.T) {
 	}
 }
 
-func TestSnapshotReadMissingAccountReturnsEmptyPayload(t *testing.T) {
-	// An account never snapshotted returns empty (not an error).
+func TestSnapshotReadMissingAccountReturnsErrSnapshotMissing(t *testing.T) {
+	// An account never snapshotted returns ErrSnapshotMissing so lifecycle
+	// can hard-stop rather than fabricate a balance (LAYER_5_1_READ_OPS §5).
 	sto, _ := buildStoreRedis(t, TimeRFC3339, SideString)
 	got, err := sto.readSnapshot(context.Background(), "no-session", "no-account")
-	if err != nil {
-		t.Fatalf("readSnapshot: %v", err)
+	if !errors.Is(err, ErrSnapshotMissing) {
+		t.Fatalf("readSnapshot: err = %v, want ErrSnapshotMissing", err)
 	}
 	if got.SessionID != "no-session" || got.AccountID != "no-account" {
-		t.Errorf("readSnapshot: ids not populated: %+v", got)
+		t.Errorf("readSnapshot: ids not populated on ErrSnapshotMissing: %+v", got)
 	}
 	if got.Cash != (CashSnap{}) {
 		t.Errorf("Cash: got %+v, want zero-value", got.Cash)
 	}
 	if len(got.Positions) != 0 || len(got.Reservations) != 0 {
 		t.Errorf("positions/reservations: got %d/%d", len(got.Positions), len(got.Reservations))
+	}
+}
+
+func TestSnapshotReadZeroCashIsDistinctFromMissing(t *testing.T) {
+	// A brand-new session with zero starting capital writes an all-zero
+	// CashSnap. It MUST be distinguishable from a missing snapshot — the
+	// former is a legitimate seeded state; the latter is a bootstrap-order
+	// bug. Without ErrSnapshotMissing the two collapse into the same
+	// (payload, nil) return and lifecycle cannot tell them apart.
+	sto, namespace := buildStoreRedis(t, TimeRFC3339, SideString)
+	_ = namespace
+
+	sessionID := "sess-zero"
+	accountID := "acct-zero"
+
+	// 1. Missing → ErrSnapshotMissing.
+	if _, err := sto.readSnapshot(context.Background(), sessionID, accountID); !errors.Is(err, ErrSnapshotMissing) {
+		t.Fatalf("missing key: err = %v, want ErrSnapshotMissing", err)
+	}
+
+	// 2. Write an all-zero CashSnap (a valid seed for a zero-capital user).
+	payload := SnapshotPayload{
+		SessionID: sessionID,
+		AccountID: accountID,
+		Cash:      CashSnap{}, // Available=0, Reserved=0, Settled=0, BankCash=0, drip inactive.
+	}
+	if err := sto.writeSnapshot(context.Background(), payload); err != nil {
+		t.Fatalf("writeSnapshot zero: %v", err)
+	}
+
+	// 3. Now the read succeeds with a zero payload — NOT ErrSnapshotMissing.
+	got, err := sto.readSnapshot(context.Background(), sessionID, accountID)
+	if err != nil {
+		t.Fatalf("readSnapshot after zero write: %v", err)
+	}
+	if got.Cash != (CashSnap{}) {
+		t.Errorf("Cash: got %+v, want zero-value", got.Cash)
 	}
 }
 
