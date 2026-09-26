@@ -73,7 +73,9 @@ func TestIntegration_OpenLoadRead(t *testing.T) {
 // teardown against real Postgres, with the two properties the doc calls
 // out most strongly:
 //
-//  1. Reconciliation: TradingCash(durable) = Available + Settled.
+//  1. Reconciliation: TradingCash(durable) = Available + Reserved
+//     (Reserved asserted 0 at save → collapses to Available). Settled is
+//     a session-only bucket and is ignored (see [[settled-semantics]]).
 //  2. Signed round-trip (Option B): a NEGATIVE Available after mutation
 //     survives SessionSave → LoadAccount unchanged — no floor, no clamp.
 //
@@ -101,10 +103,11 @@ func TestIntegration_MutateSaveSignedRoundTrip(t *testing.T) {
 
 	// Simulate mid-session mutations that a real reserve/realize flow would
 	// have made: drive Available negative (debt via DebitCash — Option B)
-	// and park some cash in Settled. The reconciliation math then reads
-	// TradingCash = (-500_000) + 700_000 = 200_000.
+	// and park some cash in Settled. Per [[settled-semantics]], TradingCash
+	// = Available + Reserved (Reserved asserted 0 → collapses to Available).
+	// Settled is deliberately non-zero here to prove it is IGNORED at save.
 	loaded.Account.Cash.Available = -500_000
-	loaded.Account.Cash.Settled = 700_000
+	loaded.Account.Cash.Settled = 700_000 // intentional distractor — must NOT appear in TradingCash
 	// Positions map already empty (born flat). Reserved stays 0.
 
 	if err := service.SessionSave(ctx, sessionID, loaded); err != nil {
@@ -118,9 +121,9 @@ func TestIntegration_MutateSaveSignedRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadAccount after save: %v", err)
 	}
-	const wantTradingCash int64 = 200_000
+	const wantTradingCash int64 = -500_000
 	if durable.TradingCash != wantTradingCash {
-		t.Errorf("reconciled TradingCash: got %d, want %d (Available+Settled)",
+		t.Errorf("reconciled TradingCash: got %d, want %d (Available + Reserved; Settled ignored)",
 			durable.TradingCash, wantTradingCash)
 	}
 
@@ -131,8 +134,9 @@ func TestIntegration_MutateSaveSignedRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second SessionLoad: %v", err)
 	}
-	// After the first save the seed for this new session is TradingCash=200_000,
-	// so start there and drive it into debt.
+	// After the first save the seed for this new session is
+	// TradingCash=-500_000; hand-set Available directly to isolate the
+	// signed round-trip. Settled left at 0 for a clean read.
 	loaded2.Account.Cash.Available = -777_777
 	loaded2.Account.Cash.Settled = 0
 	if err := service.SessionSave(ctx, sessionID+"-second", loaded2); err != nil {
