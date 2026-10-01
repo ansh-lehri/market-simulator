@@ -170,3 +170,18 @@ func seedIndiaCostRow(t *testing.T, pool *pgxpool.Pool, tradeID string, lines ma
 		t.Fatalf("seed trade_costs for %s: %v", tradeID, err)
 	}
 }
+
+// readCashColumns reads the current (trading_cash, bank_cash) for an
+// account. Used by transfer tests to assert DB state after a success
+// and to prove untouched state after a guard-rejected call.
+func readCashColumns(t *testing.T, pool *pgxpool.Pool, accountID string) (tradingCash, bankCash int64) {
+	t.Helper()
+	err := pool.QueryRow(context.Background(),
+		`SELECT trading_cash, bank_cash FROM accounts WHERE account_id = $1`,
+		accountID,
+	).Scan(&tradingCash, &bankCash)
+	if err != nil {
+		t.Fatalf("read cash for %s: %v", accountID, err)
+	}
+	return tradingCash, bankCash
+}
