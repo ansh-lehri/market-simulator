@@ -12,6 +12,7 @@ import (
 
 	"simulator/connectivity/config"
 	"simulator/connectivity/db"
+	"simulator/economy/persistence"
 )
 
 // Integration tests run against a live TEST database (migrations 0001–0003
@@ -77,18 +78,95 @@ func seedAccount(t *testing.T, pool *pgxpool.Pool, accountID, ownerType, ownerID
 	}
 }
 
-// cleanupOwnersWithPrefix schedules a DELETE on test end that removes
-// every accounts row whose owner_id starts with ownerPrefix. Scoped to
-// the test's prefix so parallel tests never clobber each other's seeds.
+// cleanupOwnersWithPrefix schedules a FK-ordered DELETE on test end:
+// trade_costs → participant_trades → accounts, scoped to the test's
+// prefix. trade_costs has FK to participant_trades (migration 0003),
+// and participant_trades has FK to accounts (migration 0002), so the
+// order matters.
 func cleanupOwnersWithPrefix(t *testing.T, pool *pgxpool.Pool, ownerPrefix string) {
 	t.Helper()
 	t.Cleanup(func() {
-		_, err := pool.Exec(context.Background(),
+		ctx := context.Background()
+		likePattern := ownerPrefix + "%"
+		// 1) trade_costs rows whose parent trade belongs to a seeded account.
+		if _, err := pool.Exec(ctx,
+			`DELETE FROM trade_costs
+			 WHERE trade_id IN (
+			     SELECT pt.trade_id FROM participant_trades pt
+			     JOIN accounts acc ON acc.account_id = pt.account_id
+			     WHERE acc.owner_id LIKE $1
+			 )`, likePattern); err != nil {
+			t.Logf("cleanup trade_costs (prefix=%s): %v", ownerPrefix, err)
+		}
+		// 2) participant_trades for seeded accounts.
+		if _, err := pool.Exec(ctx,
+			`DELETE FROM participant_trades
+			 WHERE account_id IN (
+			     SELECT account_id FROM accounts WHERE owner_id LIKE $1
+			 )`, likePattern); err != nil {
+			t.Logf("cleanup participant_trades (prefix=%s): %v", ownerPrefix, err)
+		}
+		// 3) the accounts themselves.
+		if _, err := pool.Exec(ctx,
 			`DELETE FROM accounts WHERE owner_id LIKE $1`,
-			ownerPrefix+"%",
-		)
-		if err != nil {
+			likePattern); err != nil {
 			t.Logf("cleanup accounts (prefix=%s): %v", ownerPrefix, err)
 		}
 	})
+}
+
+// tradeSeed carries every field for one hand-crafted participant_trades
+// row. Zero values mean "use the test's default for that field" when
+// baseTradeSeed builds one — see tests for the override pattern.
+type tradeSeed struct {
+	TradeID      string
+	AccountID    string
+	SessionID    string
+	InstrumentID string
+	Direction    string
+	Quantity     int64
+	EntryPrice   int64
+	ExitPrice    int64
+	EntryAt      time.Time
+	ExitAt       time.Time
+	GrossPnl     int64
+	TotalCosts   int64
+	NetPnl       int64
+	PnlPct       float32
+	ExitReason   string
+}
+
+// seedTrade INSERTs one participant_trades row with the given fields.
+// Not the drainer's SQL — this is test-only, hand-written to decouple
+// the Store's integration tests from economy/persistence's drainer
+// implementation. 15 columns match migration 0002 verbatim.
+func seedTrade(t *testing.T, pool *pgxpool.Pool, seed tradeSeed) {
+	t.Helper()
+	_, err := pool.Exec(context.Background(),
+		`INSERT INTO participant_trades (
+			trade_id, account_id, session_id, instrument_id,
+			direction, quantity, entry_price, exit_price,
+			entry_at, exit_at,
+			gross_pnl, total_costs, net_pnl, pnl_pct, exit_reason
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+		seed.TradeID, seed.AccountID, seed.SessionID, seed.InstrumentID,
+		seed.Direction, seed.Quantity, seed.EntryPrice, seed.ExitPrice,
+		seed.EntryAt, seed.ExitAt,
+		seed.GrossPnl, seed.TotalCosts, seed.NetPnl, seed.PnlPct, seed.ExitReason,
+	)
+	if err != nil {
+		t.Fatalf("seed trade %s: %v", seed.TradeID, err)
+	}
+}
+
+// seedIndiaCostRow writes one trade_costs row via the REAL
+// IndiaCostAdapter (economy/persistence). This is deliberate: the Store
+// under test reads what IndiaCostAdapter.InsertCostRow writes, so using
+// it here exercises the exact write-side column layout.
+func seedIndiaCostRow(t *testing.T, pool *pgxpool.Pool, tradeID string, lines map[string]int64, total int64) {
+	t.Helper()
+	adapter := persistence.IndiaCostAdapter{}
+	if err := adapter.InsertCostRow(context.Background(), pool, tradeID, lines, total); err != nil {
+		t.Fatalf("seed trade_costs for %s: %v", tradeID, err)
+	}
 }
