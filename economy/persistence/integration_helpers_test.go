@@ -14,6 +14,7 @@ import (
 
 	"simulator/connectivity/config"
 	"simulator/connectivity/db"
+	"simulator/country/india"
 )
 
 // Integration tests run against a live TEST database + Redis. Each test:
@@ -207,10 +208,10 @@ func baseTradeInsert(tradeID, accountID string) TradeInsert {
 		PnlPct:       1.98914,
 		ExitReason:   "voluntary",
 		CostLines: map[string]int64{
-			indiaLineSTT:      25,
-			indiaLineExchange: 3,
-			indiaLineSEBI:     1,
-			indiaLineGST:      5,
+			india.LineSTT:      25,
+			india.LineExchange: 3,
+			india.LineSEBI:     1,
+			india.LineGST:      5,
 		},
 		CostTotal: 543,
 	}

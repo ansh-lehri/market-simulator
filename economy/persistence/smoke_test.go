@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"simulator/contract"
+	"simulator/country/india"
 	"simulator/economy/account"
 	"simulator/economy/realize"
 )
@@ -147,10 +148,10 @@ func TestSmokeEndToEndBothPersistencePaths(t *testing.T) {
 			Cost: realize.TradeCostRow{
 				TradeID: realize.TradeID(tradeID),
 				Lines: map[string]int64{
-					indiaLineSTT:      25,
-					indiaLineExchange: 3,
-					indiaLineSEBI:     1,
-					indiaLineGST:      5,
+					india.LineSTT:      25,
+					india.LineExchange: 3,
+					india.LineSEBI:     1,
+					india.LineGST:      5,
 				},
 				Total: 34,
 			},

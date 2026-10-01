@@ -3,46 +3,19 @@ package persistence
 import (
 	"context"
 	"fmt"
-)
 
-// India-specific cost-line names, as emitted by cost/india.go via
-// CostBreakdown.Lines. Persistence duplicates them (rather than importing
-// from cost) to keep the country-adapter self-contained; if they ever drift
-// from cost's, an integration test at Stage 5 will catch the mismatch.
-const (
-	indiaLineSTT           = "stt"
-	indiaLineExchange      = "exchange"
-	indiaLineSEBI          = "sebi"
-	indiaLineStamp         = "stamp"
-	indiaLineGST           = "gst"
-	indiaLineAutosquareFee = "autosquare_fee"
+	"simulator/country/india"
 )
-
-// India-specific trade_costs column names, matching schema §2.3 verbatim.
-// These are the only strings persistence uses when it builds a SQL INSERT
-// for the India cost row.
-const (
-	indiaColumnBrokerage     = "brokerage"
-	indiaColumnSTT           = "stt"
-	indiaColumnExchange      = "exchange"
-	indiaColumnSEBI          = "sebi"
-	indiaColumnStamp         = "stamp"
-	indiaColumnGST           = "gst"
-	indiaColumnAutosquareFee = "autosquare_fee"
-	indiaColumnTotal         = "total"
-)
-
-// indiaTradeCostsTable is the trade_costs table name for India today
-// ("trade_costs" per schema §2.3). When schema §4's country-table split
-// lands, this stays "trade_costs" (India keeps the original table) and a
-// US adapter names its own table ("us_trade_costs").
-const indiaTradeCostsTable = "trade_costs"
 
 // indiaCostInsertSQL is the fixed INSERT statement for the India trade_costs
 // row. Column order matches the placeholders 1..9. Idempotent via
 // ON CONFLICT (trade_id) DO NOTHING so drainer replay is safe.
-const indiaCostInsertSQL = `INSERT INTO ` + indiaTradeCostsTable + ` (
-	trade_id, brokerage, stt, exchange, sebi, stamp, gst, autosquare_fee, total
+//
+// Table + column names come from country/india — the single India
+// identifier package. Both are string constants, so concatenation into a
+// const SQL literal remains compile-time.
+const indiaCostInsertSQL = `INSERT INTO ` + india.TradeCostsTable + ` (
+	trade_id, ` + india.ColumnBrokerage + `, ` + india.ColumnSTT + `, ` + india.ColumnExchange + `, ` + india.ColumnSEBI + `, ` + india.ColumnStamp + `, ` + india.ColumnGST + `, ` + india.ColumnAutosquareFee + `, ` + india.ColumnTotal + `
 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 ON CONFLICT (trade_id) DO NOTHING`
 
@@ -60,29 +33,29 @@ var _ CountryCostAdapter = IndiaCostAdapter{}
 // Unknown keys are ErrUnknownCostLine (D1: no silent drop).
 func (IndiaCostAdapter) FlattenCostColumns(lines map[string]int64, total int64) (map[string]int64, error) {
 	columns := map[string]int64{
-		indiaColumnBrokerage:     0, // D2
-		indiaColumnSTT:           0,
-		indiaColumnExchange:      0,
-		indiaColumnSEBI:          0,
-		indiaColumnStamp:         0,
-		indiaColumnGST:           0,
-		indiaColumnAutosquareFee: 0,
-		indiaColumnTotal:         total,
+		india.ColumnBrokerage:     0, // D2
+		india.ColumnSTT:           0,
+		india.ColumnExchange:      0,
+		india.ColumnSEBI:          0,
+		india.ColumnStamp:         0,
+		india.ColumnGST:           0,
+		india.ColumnAutosquareFee: 0,
+		india.ColumnTotal:         total,
 	}
 	for lineName, amount := range lines {
 		switch lineName {
-		case indiaLineSTT:
-			columns[indiaColumnSTT] = amount
-		case indiaLineExchange:
-			columns[indiaColumnExchange] = amount
-		case indiaLineSEBI:
-			columns[indiaColumnSEBI] = amount
-		case indiaLineStamp:
-			columns[indiaColumnStamp] = amount
-		case indiaLineGST:
-			columns[indiaColumnGST] = amount
-		case indiaLineAutosquareFee:
-			columns[indiaColumnAutosquareFee] = amount
+		case india.LineSTT:
+			columns[india.ColumnSTT] = amount
+		case india.LineExchange:
+			columns[india.ColumnExchange] = amount
+		case india.LineSEBI:
+			columns[india.ColumnSEBI] = amount
+		case india.LineStamp:
+			columns[india.ColumnStamp] = amount
+		case india.LineGST:
+			columns[india.ColumnGST] = amount
+		case india.LineAutosquareFee:
+			columns[india.ColumnAutosquareFee] = amount
 		default:
 			return nil, fmt.Errorf("%w: %q", ErrUnknownCostLine, lineName)
 		}
@@ -106,14 +79,14 @@ func (adapter IndiaCostAdapter) InsertCostRow(
 	}
 	_, err = executor.Exec(ctx, indiaCostInsertSQL,
 		tradeID,
-		columns[indiaColumnBrokerage],
-		columns[indiaColumnSTT],
-		columns[indiaColumnExchange],
-		columns[indiaColumnSEBI],
-		columns[indiaColumnStamp],
-		columns[indiaColumnGST],
-		columns[indiaColumnAutosquareFee],
-		columns[indiaColumnTotal],
+		columns[india.ColumnBrokerage],
+		columns[india.ColumnSTT],
+		columns[india.ColumnExchange],
+		columns[india.ColumnSEBI],
+		columns[india.ColumnStamp],
+		columns[india.ColumnGST],
+		columns[india.ColumnAutosquareFee],
+		columns[india.ColumnTotal],
 	)
 	if err != nil {
 		return fmt.Errorf("persistence: india InsertCostRow %s: %w", tradeID, err)

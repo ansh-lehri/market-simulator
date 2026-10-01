@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"simulator/country/india"
 )
 
 func TestIndiaAdapterFlattenPopulatesEveryColumn(t *testing.T) {
@@ -18,25 +20,25 @@ func TestIndiaAdapterFlattenPopulatesEveryColumn(t *testing.T) {
 	}
 
 	expectedColumns := []string{
-		indiaColumnBrokerage,
-		indiaColumnSTT,
-		indiaColumnExchange,
-		indiaColumnSEBI,
-		indiaColumnStamp,
-		indiaColumnGST,
-		indiaColumnAutosquareFee,
-		indiaColumnTotal,
+		india.ColumnBrokerage,
+		india.ColumnSTT,
+		india.ColumnExchange,
+		india.ColumnSEBI,
+		india.ColumnStamp,
+		india.ColumnGST,
+		india.ColumnAutosquareFee,
+		india.ColumnTotal,
 	}
 	for _, columnName := range expectedColumns {
 		if _, present := columns[columnName]; !present {
 			t.Errorf("column %q missing from output", columnName)
 		}
 	}
-	if columns[indiaColumnBrokerage] != 0 {
-		t.Errorf("brokerage: got %d, want 0 (D2)", columns[indiaColumnBrokerage])
+	if columns[india.ColumnBrokerage] != 0 {
+		t.Errorf("brokerage: got %d, want 0 (D2)", columns[india.ColumnBrokerage])
 	}
-	if columns[indiaColumnTotal] != 543 {
-		t.Errorf("total: got %d, want 543", columns[indiaColumnTotal])
+	if columns[india.ColumnTotal] != 543 {
+		t.Errorf("total: got %d, want 543", columns[india.ColumnTotal])
 	}
 }
 
@@ -47,12 +49,12 @@ func TestIndiaAdapterFlattenMapsEveryLineToItsColumn(t *testing.T) {
 		lineName   string
 		columnName string
 	}{
-		{indiaLineSTT, indiaColumnSTT},
-		{indiaLineExchange, indiaColumnExchange},
-		{indiaLineSEBI, indiaColumnSEBI},
-		{indiaLineStamp, indiaColumnStamp},
-		{indiaLineGST, indiaColumnGST},
-		{indiaLineAutosquareFee, indiaColumnAutosquareFee},
+		{india.LineSTT, india.ColumnSTT},
+		{india.LineExchange, india.ColumnExchange},
+		{india.LineSEBI, india.ColumnSEBI},
+		{india.LineStamp, india.ColumnStamp},
+		{india.LineGST, india.ColumnGST},
+		{india.LineAutosquareFee, india.ColumnAutosquareFee},
 	}
 	adapter := IndiaCostAdapter{}
 	for _, testCase := range cases {
@@ -70,8 +72,8 @@ func TestIndiaAdapterFlattenMapsEveryLineToItsColumn(t *testing.T) {
 			}
 			// Every other cost column stays 0.
 			for _, otherColumn := range []string{
-				indiaColumnSTT, indiaColumnExchange, indiaColumnSEBI,
-				indiaColumnStamp, indiaColumnGST, indiaColumnAutosquareFee,
+				india.ColumnSTT, india.ColumnExchange, india.ColumnSEBI,
+				india.ColumnStamp, india.ColumnGST, india.ColumnAutosquareFee,
 			} {
 				if otherColumn == testCase.columnName {
 					continue
@@ -87,12 +89,12 @@ func TestIndiaAdapterFlattenMapsEveryLineToItsColumn(t *testing.T) {
 func TestIndiaAdapterFlattenFullStack(t *testing.T) {
 	// A realistic full India stack — every line populated at once.
 	lines := map[string]int64{
-		indiaLineSTT:           25,
-		indiaLineExchange:      3,
-		indiaLineSEBI:          1,
-		indiaLineStamp:         15,
-		indiaLineGST:           5,
-		indiaLineAutosquareFee: 5000,
+		india.LineSTT:           25,
+		india.LineExchange:      3,
+		india.LineSEBI:          1,
+		india.LineStamp:         15,
+		india.LineGST:           5,
+		india.LineAutosquareFee: 5000,
 	}
 	total := int64(5049)
 	adapter := IndiaCostAdapter{}
@@ -100,19 +102,19 @@ func TestIndiaAdapterFlattenFullStack(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FlattenCostColumns: %v", err)
 	}
-	if columns[indiaColumnSTT] != 25 ||
-		columns[indiaColumnExchange] != 3 ||
-		columns[indiaColumnSEBI] != 1 ||
-		columns[indiaColumnStamp] != 15 ||
-		columns[indiaColumnGST] != 5 ||
-		columns[indiaColumnAutosquareFee] != 5000 {
+	if columns[india.ColumnSTT] != 25 ||
+		columns[india.ColumnExchange] != 3 ||
+		columns[india.ColumnSEBI] != 1 ||
+		columns[india.ColumnStamp] != 15 ||
+		columns[india.ColumnGST] != 5 ||
+		columns[india.ColumnAutosquareFee] != 5000 {
 		t.Errorf("full-stack mapping wrong: %+v", columns)
 	}
-	if columns[indiaColumnBrokerage] != 0 {
-		t.Errorf("brokerage should stay 0, got %d", columns[indiaColumnBrokerage])
+	if columns[india.ColumnBrokerage] != 0 {
+		t.Errorf("brokerage should stay 0, got %d", columns[india.ColumnBrokerage])
 	}
-	if columns[indiaColumnTotal] != total {
-		t.Errorf("total: got %d, want %d", columns[indiaColumnTotal], total)
+	if columns[india.ColumnTotal] != total {
+		t.Errorf("total: got %d, want %d", columns[india.ColumnTotal], total)
 	}
 }
 
@@ -138,9 +140,9 @@ func TestIndiaAdapterFlattenUnknownAmongstKnownStillErrors(t *testing.T) {
 	adapter := IndiaCostAdapter{}
 	_, err := adapter.FlattenCostColumns(
 		map[string]int64{
-			indiaLineSTT:      50,
-			indiaLineExchange: 3,
-			"unknown_key":     47,
+			india.LineSTT:      50,
+			india.LineExchange: 3,
+			"unknown_key":      47,
 		},
 		100,
 	)
@@ -188,7 +190,7 @@ func TestIndiaAdapterInsertCostRowIssuesFixedSQL(t *testing.T) {
 	// stt, exchange, sebi, stamp, gst, autosquare_fee, total).
 	fake := &fakeCostRowExecutor{}
 	err := IndiaCostAdapter{}.InsertCostRow(context.Background(), fake, "trd-1",
-		map[string]int64{indiaLineSTT: 25, indiaLineGST: 5}, 30)
+		map[string]int64{india.LineSTT: 25, india.LineGST: 5}, 30)
 	if err != nil {
 		t.Fatalf("InsertCostRow: %v", err)
 	}

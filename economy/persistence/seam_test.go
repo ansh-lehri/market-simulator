@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"simulator/country/india"
 	"simulator/economy/realize"
 )
 
@@ -93,7 +94,7 @@ func TestEnqueueClosedTradeLandsOnBuffer(t *testing.T) {
 		},
 		Cost: realize.TradeCostRow{
 			TradeID: "trd-enq-1",
-			Lines:   map[string]int64{indiaLineSTT: 25, indiaLineGST: 5, indiaLineExchange: 3, indiaLineSEBI: 1},
+			Lines:   map[string]int64{india.LineSTT: 25, india.LineGST: 5, india.LineExchange: 3, india.LineSEBI: 1},
 			Total:   34,
 		},
 	}
@@ -112,8 +113,8 @@ func TestEnqueueClosedTradeLandsOnBuffer(t *testing.T) {
 	if drained[0].TradeID != "trd-enq-1" {
 		t.Errorf("TradeID mismatch: got %s, want trd-enq-1", drained[0].TradeID)
 	}
-	if drained[0].CostLines[indiaLineSTT] != 25 {
-		t.Errorf("CostLines.stt: got %d, want 25", drained[0].CostLines[indiaLineSTT])
+	if drained[0].CostLines[india.LineSTT] != 25 {
+		t.Errorf("CostLines.stt: got %d, want 25", drained[0].CostLines[india.LineSTT])
 	}
 	if drained[0].CostTotal != 34 {
 		t.Errorf("CostTotal: got %d, want 34", drained[0].CostTotal)
