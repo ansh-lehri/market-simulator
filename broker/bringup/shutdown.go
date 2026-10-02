@@ -2,8 +2,8 @@ package bringup
 
 import "log/slog"
 
-// Shutdown tears the broker down in strict LIFO order
-// (BROKER_PHASE1 §1.5):
+// Shutdown tears the broker down in strict LIFO order (BROKER_PHASE1 §1.5
+// + Phase-2 Store-close unification):
 //
 //  1. Broker.Stop — closes each shard inbox; shardWG.Wait blocks until
 //     every owner goroutine has exited. **Owners must exit before any
@@ -13,7 +13,11 @@ import "log/slog"
 //     Stop returning IS the "owners exited" signal.
 //  2. For bundle in reverse(bundles): bundle.Close — persistence.Stop →
 //     Redis close → Postgres close (capstone's own LIFO).
-//  3. Store pool close — closed LAST, independently of any bundle.
+//  3. Store.Close — closes every handle the Store owns (redis then pool)
+//     in the correct internal order. Phase 2 unified this onto one call
+//     so shutdown ordering lives in one place; earlier the pool was
+//     closed from here directly, which was fine for a one-handle Store
+//     but fragmented once Phase 2 added redis + lifecycle.
 //
 // Idempotent via Runtime.shutdownOnce. Nil-safe — a nil Runtime is a
 // no-op (defensive; a caller shouldn't nil us, but double-free panics
@@ -40,13 +44,9 @@ func (runtime *Runtime) Shutdown() {
 			runtime.bundles[bundleIndex].Close()
 		}
 
-		// 3. Store pool closed LAST, via the Store's Pool() accessor so
-		//    the handle lives in one place. The Store itself does not
-		//    close its pool — this call site is the sole closer.
+		// 3. Store teardown — redis then pool, both inside Store.Close.
 		if runtime.Store != nil {
-			if pool := runtime.Store.Pool(); pool != nil {
-				pool.Close()
-			}
+			runtime.Store.Close()
 		}
 
 		slog.Info("bringup: Shutdown done")
