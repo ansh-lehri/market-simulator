@@ -12,6 +12,7 @@ import (
 	"simulator/broker/store"
 	"simulator/connectivity/config"
 	"simulator/country/india"
+	"simulator/economy/lifecycle"
 	"simulator/economy/realize"
 )
 
@@ -160,7 +161,62 @@ func TestBringUp_And_Shutdown_HappyPath_ShardCount2(t *testing.T) {
 	if got := len(runtime.bundles); got != 2 {
 		t.Errorf("bundles: got %d, want 2", got)
 	}
+	// Phase-2 wiring assertion (P2-1·D3): Store exposes a non-nil
+	// *lifecycle.Service built over an UNSTARTED persistence.Component.
+	// We can't directly observe "unstarted" without reaching into
+	// persistence internals, but the whole process stays race-clean under
+	// `-race` which it would not if a second (Store-owned) drainer were
+	// racing the per-shard bundles' drainers over the same Redis buffer.
+	if runtime.Store.Lifecycle() == nil {
+		t.Error("Store.Lifecycle() nil — Phase-2 EnsureAccount/StartSession would nil-deref")
+	}
 	runtime.Shutdown()
+}
+
+// Phase-2 smoke: the Store's lifecycle service can OpenAccount end-to-end
+// against the real wiring (unstarted Component, shared pool + redis). This
+// is the minimum proof that bringup's Phase-2 additions are plumbed
+// correctly before Stage B's EnsureAccount lands on top.
+func TestBringUp_StoreLifecycle_OpenAccountSmoke(t *testing.T) {
+	infraCfg := testInfraCfg(t)
+	runtime, err := bringUp(context.Background(), defaultCfg(), infraCfg)
+	if err != nil {
+		t.Fatalf("BringUp: %v", err)
+	}
+	t.Cleanup(runtime.Shutdown)
+
+	// Unique owner so parallel runs don't collide. Delete the row on
+	// cleanup — bringup_test.go doesn't share the broker/store integration
+	// helpers' prefix-based cleanup, so clean up by exact owner_id.
+	ownerID := fmt.Sprintf("bringup-store-lifecycle-%d", time.Now().UnixNano())
+	t.Cleanup(func() {
+		_, _ = runtime.Store.Pool().Exec(context.Background(),
+			`DELETE FROM accounts WHERE owner_id = $1`, ownerID)
+	})
+
+	accountID, err := runtime.Store.Lifecycle().OpenAccount(
+		context.Background(),
+		lifecycle.OwnerHuman, ownerID,
+		100_000 /*startingCapital*/, 50_000 /*startingBank*/,
+	)
+	if err != nil {
+		t.Fatalf("Store.Lifecycle().OpenAccount: %v", err)
+	}
+	if accountID == "" {
+		t.Error("OpenAccount returned empty AccountID")
+	}
+
+	// Round-trip via the pool to prove the row actually landed.
+	var tradingCash, bankCash int64
+	if err := runtime.Store.Pool().QueryRow(context.Background(),
+		`SELECT trading_cash, bank_cash FROM accounts WHERE account_id = $1`,
+		string(accountID),
+	).Scan(&tradingCash, &bankCash); err != nil {
+		t.Fatalf("round-trip SELECT: %v", err)
+	}
+	if tradingCash != 100_000 || bankCash != 50_000 {
+		t.Errorf("round-trip cash: got trading=%d bank=%d, want 100000/50000", tradingCash, bankCash)
+	}
 }
 
 // ShardCount=1 (smallest legal value).
