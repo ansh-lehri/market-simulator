@@ -1,6 +1,9 @@
 package funnel
 
-import "simulator/contract"
+import (
+	"simulator/contract"
+	"simulator/economy/account"
+)
 
 // The seven Tier-0 command types, split by whether the caller waits for
 // a reply (BROKER_TIER0 §3):
@@ -8,7 +11,8 @@ import "simulator/contract"
 //   Request/response (carry a buffered(1) ReplyTo, caller blocks):
 //     PlaceOrder      → Tier 1
 //     CancelOrder     → Tier 1
-//     BankMove        → Tier 3
+//     Transfer        → Tier 3 (Phase-3 finalizes the Tier-0 BankMove
+//                       placeholder; BROKER_PHASE3 §1.2 P3-D1)
 //     ReadBalance     → Tier 4
 //     ReadPositions   → Tier 4
 //
@@ -43,18 +47,30 @@ type CancelOrder struct {
 // Account returns the routing key for the funnel router.
 func (cmd CancelOrder) Account() AccountID { return cmd.AccountID }
 
-// BankMove — Tier 3 bank ↔ trading move command. Amount is strictly
-// positive; direction is carried by Dir, never by a negative amount
-// (root value discipline).
-type BankMove struct {
+// Transfer — Tier 3 bank ↔ trading move command. Finalizes the Tier-0
+// BankMove placeholder (BROKER_PHASE3 §1.2 / P3-D1): the command carries
+// L5 cash BUCKETS (not a direction enum), so the shard-side handler calls
+// account.Cash.MoveCash(From, To, Amount) with zero translation at the
+// L5 seam.
+//
+// Two-vocabulary seam (P3-D2): the live path speaks buckets (here); the
+// off-shard durable path speaks store.TransferDirection. The HTTP handler
+// in broker/transfer maps the one request direction into BOTH, once —
+// this struct does not carry a direction enum of its own.
+//
+// Amount is strictly positive (handler-validated before the command is
+// built); direction is encoded entirely by which bucket pair is passed,
+// never by a sign on Amount (root value discipline).
+type Transfer struct {
 	AccountID AccountID
-	Dir       BankDir
+	From      account.Bucket
+	To        account.Bucket
 	Amount    int64
-	ReplyTo   chan BankResult // buffered(1); caller-owned
+	ReplyTo   chan TransferResult // buffered(1); caller-owned
 }
 
 // Account returns the routing key for the funnel router.
-func (cmd BankMove) Account() AccountID { return cmd.AccountID }
+func (cmd Transfer) Account() AccountID { return cmd.AccountID }
 
 // ReadBalance — Tier 4 live-balance read. Copy-out contract: the handler
 // returns a by-value snapshot, never a pointer into the owned Account
