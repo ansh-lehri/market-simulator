@@ -3,6 +3,8 @@ package funnel
 import (
 	"strings"
 	"testing"
+
+	"simulator/economy/account"
 )
 
 // Dispatch coverage — every Tier-0 command type must land in its own
@@ -42,16 +44,22 @@ func TestShardDispatch_CancelOrderSendsReply(t *testing.T) {
 	}
 }
 
-func TestShardDispatch_BankMoveSendsReply(t *testing.T) {
+func TestShardDispatch_TransferSendsReply(t *testing.T) {
 	dispatchedShard := newShard("B-dispatch", 4, nil)
-	replyChannel := make(chan BankResult, 1)
+	replyChannel := make(chan TransferResult, 1)
 
-	dispatchedShard.dispatch(BankMove{AccountID: "acct-a", Dir: PullToTrading, Amount: 100, ReplyTo: replyChannel})
+	dispatchedShard.dispatch(Transfer{
+		AccountID: "acct-a",
+		From:      account.Bank,
+		To:        account.Available,
+		Amount:    100,
+		ReplyTo:   replyChannel,
+	})
 
 	select {
 	case <-replyChannel:
 	default:
-		t.Fatalf("BankMove: dispatch did not send on ReplyTo")
+		t.Fatalf("Transfer: dispatch did not send on ReplyTo")
 	}
 }
 
