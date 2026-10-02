@@ -171,6 +171,18 @@ func seedIndiaCostRow(t *testing.T, pool *pgxpool.Pool, tradeID string, lines ma
 	}
 }
 
+// newPoolOnlyStore builds a Store wired against only the Postgres pool
+// (nil redis, nil lifecycle). Suitable for any test whose methods under
+// test are strictly pool-backed: AccountHandle, TradingCash, the
+// trade/cost reads, DurableTransfer. Nils are intentional — those methods
+// never dereference redis or lifecycle, and a test exercising a method
+// that DOES (the lifecycle-driven EnsureAccount / StartSession paths)
+// must build its own Store with real redis + lifecycle wiring (see the
+// bringup integration tests).
+func newPoolOnlyStore(pool *pgxpool.Pool) *Store {
+	return NewStore(pool, nil, nil)
+}
+
 // readCashColumns reads the current (trading_cash, bank_cash) for an
 // account. Used by transfer tests to assert DB state after a success
 // and to prove untouched state after a guard-rejected call.
