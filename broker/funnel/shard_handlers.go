@@ -1,6 +1,9 @@
 package funnel
 
-import "fmt"
+import (
+	"fmt"
+	"log/slog"
+)
 
 // dispatch is the type-switch that routes an inbound command to the
 // matching handler (BROKER_TIER0 §Point-4). Request/response cases send
@@ -68,19 +71,76 @@ func (ownerShard *shard) handleCancel(cmd CancelOrder) CancelResult {
 	return CancelResult{}
 }
 
-// handleTransfer is the Tier-3 bank-move seam — the in-session Stage-1
-// branch of the Phase-3 design (BROKER_PHASE3 §2.2). Phase-3 Stage A
-// leaves the body as the Phase-0 empty echo so dispatch stays well-typed;
-// Stage B fills the real body (XOR + MoveCash + MarkSnapshotDirty +
-// mode-blind {Available, Bank} reply).
+// handleTransfer is the Tier-3 in-session bank-move body (BROKER_PHASE3
+// §2.2, P3-D5/D6/D9). Runs on the owner goroutine; three outcomes:
 //
-// The zero value returned here is TransferResult{Present:false}; no HTTP
-// handler exists in Stage A, so nothing acts on it. The off-shard Stage-2
-// durable transfer (store.DurableTransfer) is composed by the Phase-3
-// HTTP handler, not here (P3-D4).
+//   - !live                       → TransferResult{Present:false}      (HTTP falls to durable)
+//   - MoveCash err (live-reject)  → TransferResult{Present:true, Err}   (HTTP → 422 / 500)
+//   - ok                          → TransferResult{Present:true, A, B}  (HTTP → 200)
+//
+// Four load-bearing properties live in the sequence below:
+//
+//  1. The account is reached via sess.account.Account.Cash — the
+//     LoadedAccount envelope is a value on ownedSession, but the inner
+//     Account is a pointer and s.sessions is pointer-valued, so the
+//     MoveCash mutation lands on the live account (P3-D6).
+//  2. MoveCash fails BEFORE mutating on amount<=0 / illegal edge /
+//     insufficient source (economy/account/cash.go) — on Err we are
+//     guaranteed nothing moved, so returning (Err, no balances) is the
+//     correct report and no rollback is needed.
+//  3. MarkSnapshotDirty is unconditional on the ok path (P3-D9, mode-
+//     blind). On-demand isolation is enforced later at session_save
+//     via PersistOnClose=false; gating here would be wrong.
+//  4. The post-move balances are read from the SAME in-memory Cash we
+//     just mutated — single-writer makes that safe without a lock.
+//
+// Logging: debug on entry + idle miss (routine), warn on live-reject
+// (user-visible failure, nothing broken), info on success. No log inside
+// MoveCash — the hand must stay pure/replayable (root logging rule).
 func (ownerShard *shard) handleTransfer(cmd Transfer) TransferResult {
-	_ = cmd
-	return TransferResult{}
+	slog.Debug("funnel: handleTransfer begin",
+		"account_id", cmd.AccountID,
+		"from", cmd.From,
+		"to", cmd.To,
+		"amount", cmd.Amount,
+	)
+
+	sess, live := ownerShard.sessions[cmd.AccountID]
+	if !live {
+		slog.Debug("funnel: handleTransfer not live (routing to durable)",
+			"account_id", cmd.AccountID,
+		)
+		return TransferResult{Present: false}
+	}
+
+	if err := sess.account.Account.Cash.MoveCash(cmd.From, cmd.To, cmd.Amount); err != nil {
+		slog.Warn("funnel: handleTransfer rejected",
+			"account_id", cmd.AccountID,
+			"session_id", sess.binding.SessionID,
+			"from", cmd.From,
+			"to", cmd.To,
+			"amount", cmd.Amount,
+			"err", err,
+		)
+		return TransferResult{Present: true, Err: err}
+	}
+
+	ownerShard.bundle.Persist.MarkSnapshotDirty(sess.binding.SessionID, cmd.AccountID)
+
+	slog.Info("funnel: handleTransfer ok",
+		"account_id", cmd.AccountID,
+		"session_id", sess.binding.SessionID,
+		"from", cmd.From,
+		"to", cmd.To,
+		"amount", cmd.Amount,
+		"post_available", sess.account.Account.Cash.Available,
+		"post_bank", sess.account.Account.Cash.Bank,
+	)
+	return TransferResult{
+		Present:   true,
+		Available: sess.account.Account.Cash.Available,
+		Bank:      sess.account.Account.Cash.Bank,
+	}
 }
 
 // handleReadBalance is the Tier-4 live-balance-read seam. The copy-out
