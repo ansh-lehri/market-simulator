@@ -42,6 +42,30 @@ type BrokerConfig struct {
 	// shard owners (P1-D2 locked a shard pool at MaxConns >= 2; the
 	// Store pool is independently sized here).
 	StoreMaxConns int32
+
+	// StartingCapital is stamped as every account's initial trading_cash
+	// at EnsureAccount's lifecycle.OpenAccount call (BROKER_PHASE2 §1 /
+	// P2-1·D4). Must be >= 0 — trading_cash is signed for later debt, but
+	// at birth it's always non-negative (lifecycle enforces the same
+	// floor; validate catches it here first so the error carries bringup's
+	// context). The value is an open dial per the Phase-2 doc; zero is
+	// legal and means "accounts start with no trading cash."
+	StartingCapital int64
+
+	// StartingBank is stamped as every account's initial bank_cash at
+	// EnsureAccount's lifecycle.OpenAccount call (BROKER_PHASE2 §1 /
+	// P2-1·D4). Must be >= 0 — bank_cash carries a DB CHECK (ck_bank_nonneg,
+	// migration 0001) that would reject a negative value at insert time;
+	// validate catches it earlier so the error is a config error, not a
+	// driver violation. Zero is legal.
+	StartingBank int64
+
+	// OnDemandMinimum is the threshold QualifyOnDemand compares the
+	// account's signed trading_cash against (BROKER_PHASE2 §2 / P2-2·D3).
+	// L7 never sees this number — the gate returns only a boolean. Must
+	// be >= 0; zero means "no bar" (every account qualifies). The actual
+	// value is an open dial per the Phase-2 doc.
+	OnDemandMinimum int64
 }
 
 // ErrBadConfig wraps BrokerConfig validation failures. Category sentinel
@@ -63,6 +87,15 @@ func (brokerCfg BrokerConfig) validate() error {
 	}
 	if brokerCfg.Country == "" {
 		return fmt.Errorf("Country empty: %w", ErrBadConfig)
+	}
+	if brokerCfg.StartingCapital < 0 {
+		return fmt.Errorf("StartingCapital=%d (must be >= 0): %w", brokerCfg.StartingCapital, ErrBadConfig)
+	}
+	if brokerCfg.StartingBank < 0 {
+		return fmt.Errorf("StartingBank=%d (must be >= 0): %w", brokerCfg.StartingBank, ErrBadConfig)
+	}
+	if brokerCfg.OnDemandMinimum < 0 {
+		return fmt.Errorf("OnDemandMinimum=%d (must be >= 0): %w", brokerCfg.OnDemandMinimum, ErrBadConfig)
 	}
 	return nil
 }
