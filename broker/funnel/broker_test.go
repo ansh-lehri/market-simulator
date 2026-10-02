@@ -24,7 +24,7 @@ func TestNewBroker_ShapeMatchesBundles(t *testing.T) {
 	bundles := make([]*capstone.Bundle, 4)
 	// bundles[i] == nil is legal in Phase 0 (per-shard L5 wiring is
 	// skipped when the bundle is nil; see newShard).
-	brokerUnderTest := NewBroker("B-shape", 8, bundles, nil)
+	brokerUnderTest := NewBroker("B-shape", 8, bundles, nil, MoneyConfig{})
 
 	if brokerUnderTest.brokerID != "B-shape" {
 		t.Fatalf("brokerID = %q, want %q", brokerUnderTest.brokerID, "B-shape")
@@ -58,7 +58,7 @@ func TestNewBroker_PanicsOnEmptyBundles(t *testing.T) {
 			t.Fatalf("expected panic on empty bundles; got none")
 		}
 	}()
-	_ = NewBroker("B-empty", 8, nil, nil)
+	_ = NewBroker("B-empty", 8, nil, nil, MoneyConfig{})
 }
 
 // ---- Start / Stop ordering -------------------------------------------
@@ -68,7 +68,7 @@ func TestNewBroker_PanicsOnEmptyBundles(t *testing.T) {
 // signal that owners have exited — Phase-1 shutdown depends on this
 // synchronization (BROKER_PHASE1 §1.5).
 func TestBroker_StartStopIsClean(t *testing.T) {
-	brokerUnderTest := NewBroker("B-startstop", 4, make([]*capstone.Bundle, 2), nil)
+	brokerUnderTest := NewBroker("B-startstop", 4, make([]*capstone.Bundle, 2), nil, MoneyConfig{})
 	brokerUnderTest.Start()
 
 	done := make(chan struct{})
@@ -89,7 +89,7 @@ func TestBroker_StartStopIsClean(t *testing.T) {
 // Stop returns (buffered replies still land in caller-owned channels).
 func TestBroker_StopDrainsInFlightCommands(t *testing.T) {
 	const commandCount = 32
-	brokerUnderTest := NewBroker("B-drain", commandCount, make([]*capstone.Bundle, 2), nil)
+	brokerUnderTest := NewBroker("B-drain", commandCount, make([]*capstone.Bundle, 2), nil, MoneyConfig{})
 
 	replies := make([]chan PlaceResult, commandCount)
 	for commandIndex := 0; commandIndex < commandCount; commandIndex++ {
@@ -120,7 +120,7 @@ func TestBroker_StopDrainsInFlightCommands(t *testing.T) {
 // 2 violation (account state split).
 func TestBroker_Route_AccountAlwaysSameShard(t *testing.T) {
 	const shardCount = 4
-	brokerUnderTest := NewBroker("B-route", 128, make([]*capstone.Bundle, shardCount), nil)
+	brokerUnderTest := NewBroker("B-route", 128, make([]*capstone.Bundle, shardCount), nil, MoneyConfig{})
 
 	// Find two accountIDs whose hash lands on two DIFFERENT shards, so
 	// the "no cross-shard leak" assertion below is meaningful. Fixed
@@ -180,7 +180,7 @@ func TestBroker_Route_AccountAlwaysSameShard(t *testing.T) {
 // G3 happy path: with the broker Started, PlaceOrder returns the
 // zero-value PlaceResult (the Phase-0 echo) and a nil error.
 func TestBroker_PlaceOrder_ReplyHappyPath(t *testing.T) {
-	brokerUnderTest := NewBroker("B-happy", 8, make([]*capstone.Bundle, 2), nil)
+	brokerUnderTest := NewBroker("B-happy", 8, make([]*capstone.Bundle, 2), nil, MoneyConfig{})
 	brokerUnderTest.Start()
 	defer brokerUnderTest.Stop()
 
@@ -198,7 +198,7 @@ func TestBroker_PlaceOrder_ReplyHappyPath(t *testing.T) {
 // the shard's inbox; after Start it is processed (proven via the reply
 // channel we constructed ourselves via route).
 func TestBroker_PlaceOrder_ReplyTimeout(t *testing.T) {
-	brokerUnderTest := NewBroker("B-timeout", 8, make([]*capstone.Bundle, 2), nil)
+	brokerUnderTest := NewBroker("B-timeout", 8, make([]*capstone.Bundle, 2), nil, MoneyConfig{})
 	defer brokerUnderTest.Stop()
 
 	canceledCtx, cancel := context.WithCancel(context.Background())
@@ -215,7 +215,7 @@ func TestBroker_PlaceOrder_ReplyTimeout(t *testing.T) {
 // (owning the reply channel), asserting nothing before Start, then
 // asserting arrival after Start.
 func TestBroker_ShardProcessesCommand_AfterCallerTimeout(t *testing.T) {
-	brokerUnderTest := NewBroker("B-post-timeout", 8, make([]*capstone.Bundle, 2), nil)
+	brokerUnderTest := NewBroker("B-post-timeout", 8, make([]*capstone.Bundle, 2), nil, MoneyConfig{})
 
 	ownedReply := make(chan PlaceResult, 1)
 	brokerUnderTest.route(PlaceOrder{AccountID: "acct-post-timeout", ReplyTo: ownedReply})
@@ -242,7 +242,7 @@ func TestBroker_ShardProcessesCommand_AfterCallerTimeout(t *testing.T) {
 // Push helpers route the appropriate command onto the shard's inbox and
 // do not block on a reply.
 func TestBroker_PushHelpers_RouteAndReturn(t *testing.T) {
-	brokerUnderTest := NewBroker("B-push", 16, make([]*capstone.Bundle, 2), nil)
+	brokerUnderTest := NewBroker("B-push", 16, make([]*capstone.Bundle, 2), nil, MoneyConfig{})
 
 	// Push before Start — commands accumulate; Stop closes inboxes and
 	// we can drain to prove they routed to the correct shard.
@@ -317,7 +317,7 @@ func TestShard_Get_ReturnsAccountFromLoadedSession(t *testing.T) {
 func TestNewBroker_PerShardWiringIsDistinct(t *testing.T) {
 	firstBundle := &capstone.Bundle{}
 	secondBundle := &capstone.Bundle{}
-	brokerUnderTest := NewBroker("B-distinct", 4, []*capstone.Bundle{firstBundle, secondBundle}, nil)
+	brokerUnderTest := NewBroker("B-distinct", 4, []*capstone.Bundle{firstBundle, secondBundle}, nil, MoneyConfig{})
 
 	firstShard := brokerUnderTest.shards[0]
 	secondShard := brokerUnderTest.shards[1]
