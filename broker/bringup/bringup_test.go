@@ -101,6 +101,36 @@ func TestBringUp_BadConfig_EmptyCountry(t *testing.T) {
 	}
 }
 
+// Phase-2 money dials: validate rejects negatives BEFORE any infra opens.
+// The infra config is empty — if validate didn't short-circuit, we'd see
+// a Postgres-dial failure instead of ErrBadConfig.
+func TestBringUp_BadConfig_NegativeStartingCapital(t *testing.T) {
+	badCfg := defaultCfg()
+	badCfg.StartingCapital = -1
+	_, err := bringUp(context.Background(), badCfg, config.Config{})
+	if !errors.Is(err, ErrBadConfig) {
+		t.Fatalf("err: got %v, want ErrBadConfig", err)
+	}
+}
+
+func TestBringUp_BadConfig_NegativeStartingBank(t *testing.T) {
+	badCfg := defaultCfg()
+	badCfg.StartingBank = -1
+	_, err := bringUp(context.Background(), badCfg, config.Config{})
+	if !errors.Is(err, ErrBadConfig) {
+		t.Fatalf("err: got %v, want ErrBadConfig", err)
+	}
+}
+
+func TestBringUp_BadConfig_NegativeOnDemandMinimum(t *testing.T) {
+	badCfg := defaultCfg()
+	badCfg.OnDemandMinimum = -1
+	_, err := bringUp(context.Background(), badCfg, config.Config{})
+	if !errors.Is(err, ErrBadConfig) {
+		t.Fatalf("err: got %v, want ErrBadConfig", err)
+	}
+}
+
 // Country allowlist: "US" is in the allowlist but returns
 // ErrCountryUnavailable (slot defined, body not built). Fires AFTER
 // validate() but BEFORE any pool opens — observable because the error
