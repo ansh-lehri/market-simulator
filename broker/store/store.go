@@ -23,3 +23,11 @@ type Store struct {
 func NewStore(pool *pgxpool.Pool) *Store {
 	return &Store{pool: pool}
 }
+
+// Pool returns the underlying Postgres pool so the wiring root can close
+// it on Shutdown. The Store itself never closes the pool — teardown is
+// the wiring root's job per BROKER_PHASE1 §1.5 — but the handle lives
+// in one place (here), not duplicated on Runtime.
+func (store *Store) Pool() *pgxpool.Pool {
+	return store.pool
+}
