@@ -1,6 +1,10 @@
 package funnel
 
-import "testing"
+import (
+	"testing"
+
+	"simulator/economy/account"
+)
 
 // Every Tier-0 command must implement Command by returning its stored
 // AccountID from Account(). This is the "command interface totality"
@@ -17,7 +21,7 @@ import "testing"
 var (
 	_ Command = PlaceOrder{}
 	_ Command = CancelOrder{}
-	_ Command = BankMove{}
+	_ Command = Transfer{}
 	_ Command = ReadBalance{}
 	_ Command = ReadPositions{}
 	_ Command = ApplyResult{}
@@ -33,7 +37,7 @@ func TestCommand_AccountReturnsRoutingKey(t *testing.T) {
 	}{
 		{"PlaceOrder", PlaceOrder{AccountID: wantAccount}},
 		{"CancelOrder", CancelOrder{AccountID: wantAccount}},
-		{"BankMove", BankMove{AccountID: wantAccount, Dir: PullToTrading, Amount: 1}},
+		{"Transfer", Transfer{AccountID: wantAccount, From: account.Bank, To: account.Available, Amount: 1}},
 		{"ReadBalance", ReadBalance{AccountID: wantAccount}},
 		{"ReadPositions", ReadPositions{AccountID: wantAccount}},
 		{"ApplyResult", ApplyResult{AccountID: wantAccount}},
