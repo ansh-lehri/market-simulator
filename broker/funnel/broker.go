@@ -27,6 +27,10 @@ import (
 //               Phase-0 tests, real in Phase-1 BringUp. Held on Broker so
 //               shutdown ordering (owners exit → bundle Close → store
 //               pool close) has a single owner.
+//   money       Phase-2 money dials (starting capital/bank for EnsureAccount's
+//               OpenAccount call; the on-demand floor for QualifyOnDemand).
+//               Zero-valued in funnel-internal tests that don't exercise
+//               those surfaces; populated by bringup from BrokerConfig.
 //   shardWG     tracks the N run-goroutines so Stop can block until they
 //               have drained and returned. Load-bearing at Phase-1
 //               shutdown: a shard's final MarkSnapshotDirty must not land
@@ -36,6 +40,7 @@ type Broker struct {
 	shards     []*shard
 	shardCount int
 	store      *Store
+	money      MoneyConfig
 	shardWG    sync.WaitGroup
 }
 
@@ -44,20 +49,20 @@ type Broker struct {
 // Start spawns any goroutine, so touching the shard slice here is
 // single-threaded and safe without a lock.
 //
-// Signature per BROKER_PHASE1 §1.4 (supersedes the Tier-0 doc's earlier
-// NewBroker(brokerID, n, inboxDepth, cost, persist, lifecycle) shape).
-// A nil-slot in bundles yields a shard with nil resv / realiz — legal
-// for Phase-0 machine tests that never invoke a handler body that would
-// call reserve / realize.
+// Signature per BROKER_PHASE1 §1.4, extended at Phase 2 with the money
+// dial struct (BROKER_PHASE2 §1 / §2). A nil-slot in bundles yields a
+// shard with nil resv / realiz — legal for funnel-internal tests that
+// never invoke a handler body that would call reserve / realize.
 //
-// A nil store is legal in Phase 0; Phase-1 BringUp always supplies a
-// real *Store.
+// A nil store is legal in Phase 0 / funnel-internal tests; BringUp always
+// supplies a real *Store. A zero-valued MoneyConfig is legal in tests
+// that do not exercise EnsureAccount / QualifyOnDemand.
 //
 // Panics if bundles is empty — a zero-shard broker cannot route (hash
 // modulo zero is undefined). This is a construction-time invariant, not
 // a runtime condition; a caller passing an empty slice is a programming
 // error.
-func NewBroker(brokerID BrokerID, inboxDepth int, bundles []*capstone.Bundle, store *Store) *Broker {
+func NewBroker(brokerID BrokerID, inboxDepth int, bundles []*capstone.Bundle, store *Store, money MoneyConfig) *Broker {
 	if len(bundles) == 0 {
 		panic("funnel: NewBroker requires at least one bundle (shardCount = len(bundles) must be > 0)")
 	}
@@ -66,6 +71,7 @@ func NewBroker(brokerID BrokerID, inboxDepth int, bundles []*capstone.Bundle, st
 		shards:     make([]*shard, len(bundles)),
 		shardCount: len(bundles),
 		store:      store,
+		money:      money,
 	}
 	for shardIndex, bundle := range bundles {
 		builtBroker.shards[shardIndex] = newShard(brokerID, inboxDepth, bundle)
@@ -75,6 +81,9 @@ func NewBroker(brokerID BrokerID, inboxDepth int, bundles []*capstone.Bundle, st
 		"shard_count", builtBroker.shardCount,
 		"inbox_depth", inboxDepth,
 		"store_present", store != nil,
+		"starting_capital", money.StartingCapital,
+		"starting_bank", money.StartingBank,
+		"on_demand_minimum", money.OnDemandMinimum,
 	)
 	return builtBroker
 }
