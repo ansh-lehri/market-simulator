@@ -3,9 +3,11 @@ package funnel
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 
 	"simulator/broker/store"
+	"simulator/contract"
 	"simulator/economy/lifecycle"
 )
 
@@ -227,4 +229,183 @@ func (broker *Broker) QualifyOnDemand(ctx context.Context, accountID AccountID) 
 		)
 		return false, store.ErrLoadFailed
 	}
+}
+
+// SessionStartCmd is L7's payload for Phase-2 Point 3's StartSession. L7
+// fills these fields from its own registry at session trigger time; the
+// broker owns the shape and the delivery onto the owning shard.
+//
+// Mode selects the loader (Canonical → SessionLoad, OnDemand →
+// OndemandSessionLoad) — the single divergence between the two flows
+// inside the broker. ExchangeInbound is the per-session outbound half of
+// the exchange seam L7 injects; the broker never minted it and never
+// branches on mode at the punch (the mode-blind punch reads
+// ownedSession.binding.ExchangeInbound verbatim, Tier 1).
+type SessionStartCmd struct {
+	AccountID       AccountID
+	SessionID       SessionID
+	Mode            lifecycle.SessionType
+	ExchangeID      ExchangeID
+	ExchangeInbound chan<- contract.InboundMessage
+	Participant     ParticipantID
+}
+
+// StartSession is BROKER_PHASE2 §3 Point 3 — the off-shard orchestrator
+// that turns a durable account into a live in-memory session on its
+// owning shard. Two stages, with a hard split at the funnel boundary:
+//
+//  1. OFF-SHARD, on the caller's goroutine:
+//     - Validate the command (nil binding / empty participant) before any
+//       I/O so a malformed trigger wastes zero resources.
+//     - Load the account via the Store's lifecycle.Service (slow I/O —
+//       1 Postgres read + 1 Redis snapshot write). Branches by Mode: the
+//       two loaders are the ONLY divergence between canonical and
+//       on-demand flows inside the broker. Snapshot-fail policy lives
+//       inside the L5 loaders (canonical hard-fails, on-demand tolerates)
+//       — StartSession propagates the loader's error uniformly, no
+//       broker branch.
+//
+//  2. ON-SHARD, via the funnel command path:
+//     - Build the SessionBinding and route an InstallSession command.
+//       The install itself (XOR guard + map write + reply) is pure
+//       in-memory on the owner goroutine — the single-writer rule
+//       protects s.sessions, so install MUST be a command even though
+//       the load does not have to be.
+//     - Wait for the shard's reply (nil on install, ErrSessionAlreadyLive
+//       on XOR refusal), or ctx deadline → ErrBrokerTimeout.
+//
+// Why the load runs off-shard: a shard owns many accounts across many
+// markets. Running SessionLoad's Postgres+Redis round-trips on the shard
+// would freeze every other account on that partition — including live
+// order flow. Loads also arrive in bulk at market open and A15 agent
+// population, so on-shard I/O would saturate shards. Single-writer
+// protects s.sessions (which is why install must be a command); it does
+// not protect the not-yet-existent account (which is why the build can
+// run anywhere).
+//
+// Error contract (traces to BROKER_PHASE2 §3 error table):
+//
+//   - nil                             → session installed, caller may
+//                                       proceed to intake orders
+//   - ErrBadBinding                   → nil ExchangeInbound; off-shard
+//                                       reject, no I/O
+//   - ErrBadParticipant               → empty Participant; off-shard
+//                                       reject, no I/O
+//   - lifecycle.ErrNoAccount          → account row missing (bug: caller
+//                                       must have run EnsureAccount
+//                                       first); nothing installed
+//   - lifecycle.ErrLoadFailed         → Postgres unreachable mid-load;
+//                                       nothing installed
+//   - lifecycle.ErrSnapshotWriteFailed → canonical hard-failed on Redis
+//                                       seed; nothing installed (durable
+//                                       row untouched). On-demand never
+//                                       surfaces this — the loader
+//                                       tolerates and returns nil.
+//   - ErrSessionAlreadyLive           → XOR refused; the live session for
+//                                       this account is NOT the one just
+//                                       loaded (teardown clears the slot)
+//   - ErrBrokerTimeout                → shard did not reply before ctx
+//                                       fired; the install may still have
+//                                       landed (caller reconciles via a
+//                                       pull-based read)
+//   - error from fmt.Errorf           → unknown Mode value (programming
+//                                       error at the caller — Mode must
+//                                       be Canonical or OnDemand)
+func (broker *Broker) StartSession(ctx context.Context, cmd SessionStartCmd) error {
+	// Stage 1a — validate off-shard. These guards must fire BEFORE any
+	// loader call so a malformed command does not even cost a Postgres
+	// read.
+	if cmd.ExchangeInbound == nil {
+		slog.Error("funnel: StartSession ErrBadBinding",
+			"account_id", cmd.AccountID,
+			"session_id", cmd.SessionID,
+		)
+		return ErrBadBinding
+	}
+	if cmd.Participant == "" {
+		slog.Error("funnel: StartSession ErrBadParticipant",
+			"account_id", cmd.AccountID,
+			"session_id", cmd.SessionID,
+		)
+		return ErrBadParticipant
+	}
+
+	slog.Info("funnel: StartSession begin",
+		"account_id", cmd.AccountID,
+		"session_id", cmd.SessionID,
+		"mode", cmd.Mode,
+		"exchange_id", cmd.ExchangeID,
+	)
+
+	// Stage 1b — load the account via the Store's lifecycle service.
+	// Mode is the ONLY divergence. Snapshot-fail policy lives in the
+	// loaders; StartSession propagates whatever they return.
+	var (
+		loaded     lifecycle.LoadedAccount
+		loaderName string
+		loaderErr  error
+	)
+	switch cmd.Mode {
+	case lifecycle.Canonical:
+		loaderName = "SessionLoad"
+		loaded, loaderErr = broker.store.Lifecycle().SessionLoad(ctx, cmd.SessionID, cmd.AccountID)
+	case lifecycle.OnDemand:
+		loaderName = "OndemandSessionLoad"
+		loaded, loaderErr = broker.store.Lifecycle().OndemandSessionLoad(ctx, cmd.SessionID, cmd.AccountID)
+	default:
+		// Programming error at the caller; a Mode outside the enum is a
+		// bug upstream, not a runtime condition to tolerate.
+		slog.Error("funnel: StartSession unknown Mode",
+			"account_id", cmd.AccountID,
+			"session_id", cmd.SessionID,
+			"mode", int(cmd.Mode),
+		)
+		return fmt.Errorf("funnel: StartSession: unknown Mode %v (want Canonical|OnDemand)", cmd.Mode)
+	}
+	if loaderErr != nil {
+		slog.Error("funnel: StartSession loader failed",
+			"account_id", cmd.AccountID,
+			"session_id", cmd.SessionID,
+			"loader", loaderName,
+			"err", loaderErr,
+		)
+		return loaderErr
+	}
+
+	// Stage 2 — build the per-session binding and route the install
+	// command. The shard handler's XOR guard is the final authority on
+	// the one-live-session rule.
+	binding := SessionBinding{
+		SessionID:       cmd.SessionID,
+		ExchangeID:      cmd.ExchangeID,
+		ExchangeInbound: cmd.ExchangeInbound,
+	}
+	reply := make(chan error, 1) // buffered-1 per Tier-0 §7
+	broker.route(InstallSession{
+		AccountID:   cmd.AccountID,
+		Loaded:      loaded,
+		Binding:     binding,
+		Participant: cmd.Participant,
+		Reply:       reply,
+	})
+
+	// Stage 2 cont. — wait for the shard reply, or ctx deadline. On
+	// timeout the shard still processes and sends on reply; the value
+	// drops into the buffer and is GC'd when we walk away.
+	installErr := broker.waitReply(ctx, reply)
+	if installErr != nil {
+		slog.Error("funnel: StartSession install failed",
+			"account_id", cmd.AccountID,
+			"session_id", cmd.SessionID,
+			"err", installErr,
+		)
+		return installErr
+	}
+
+	slog.Info("funnel: StartSession ok",
+		"account_id", cmd.AccountID,
+		"session_id", cmd.SessionID,
+		"mode", cmd.Mode,
+	)
+	return nil
 }
