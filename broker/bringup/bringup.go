@@ -49,7 +49,7 @@ type Runtime struct {
 //  5. Open the Store's OWN Postgres pool (same cluster, independently
 //     sized via cfg.StoreMaxConns / defaultStoreMaxConns). On failure,
 //     every bundle is Close'd and the error returned.
-//  6. funnel.NewBroker(cfg.BrokerID, cfg.InboxDepth, bundles, store).
+//  6. funnel.NewBroker(cfg.BrokerID, cfg.InboxDepth, bundles, store, money).
 //  7. broker.Start() — spawn N owner goroutines; each parks on its
 //     inbox.
 //
@@ -61,6 +61,19 @@ func BringUp(ctx context.Context, brokerCfg BrokerConfig) (*Runtime, error) {
 		return nil, fmt.Errorf("bringup: config.Load: %w", err)
 	}
 	return bringUp(ctx, brokerCfg, infra)
+}
+
+// BringUpForTest is the public shim external *_test packages use to build
+// a Runtime against a caller-supplied connectivity.Config (typically
+// composed from TEST_DATABASE_URL / TEST_REDIS_URL). Delegates straight
+// to bringUp; exists only so the broker/funnel integration tests can wire
+// a real Runtime through the one correct path without duplicating it.
+//
+// Production code must NOT call this — use BringUp, which loads config
+// from env once per process (per connectivity/CLAUDE.md's "Load() is the
+// only env read" invariant).
+func BringUpForTest(ctx context.Context, brokerCfg BrokerConfig, infraCfg config.Config) (*Runtime, error) {
+	return bringUp(ctx, brokerCfg, infraCfg)
 }
 
 // bringUp is the testable core. Public BringUp delegates here with an
@@ -131,7 +144,12 @@ func bringUp(ctx context.Context, brokerCfg BrokerConfig, infraCfg config.Config
 	storeLifecycle := lifecycle.NewService(storePersist)
 
 	brokerStore := store.NewStore(storePool, storeRedis, storeLifecycle)
-	brokerInstance := funnel.NewBroker(brokerCfg.BrokerID, brokerCfg.InboxDepth, bundles, brokerStore)
+	brokerMoney := funnel.MoneyConfig{
+		StartingCapital: brokerCfg.StartingCapital,
+		StartingBank:    brokerCfg.StartingBank,
+		OnDemandMinimum: brokerCfg.OnDemandMinimum,
+	}
+	brokerInstance := funnel.NewBroker(brokerCfg.BrokerID, brokerCfg.InboxDepth, bundles, brokerStore, brokerMoney)
 	brokerInstance.Start()
 
 	slog.Info("bringup: broker up",
