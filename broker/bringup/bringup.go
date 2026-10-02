@@ -11,6 +11,8 @@ import (
 	"simulator/connectivity/config"
 	"simulator/connectivity/db"
 	"simulator/economy/capstone"
+	"simulator/economy/lifecycle"
+	"simulator/economy/persistence"
 )
 
 // Runtime is the handle BringUp returns and Shutdown consumes. It is
@@ -106,7 +108,29 @@ func bringUp(ctx context.Context, brokerCfg BrokerConfig, infraCfg config.Config
 		return nil, fmt.Errorf("bringup: Store pool: %w", poolErr)
 	}
 
-	brokerStore := store.NewStore(storePool)
+	// Store's OWN Redis client. Same cluster + same empty KeyNamespace as
+	// each per-shard bundle so a snapshot the Store writes at session load
+	// lands at the exact key the owning shard later mutates and the save
+	// path deletes. Phase-2 supersession P2-1·D3.
+	storeRedis, redisErr := db.NewRedis(ctx, infraCfg.Redis)
+	if redisErr != nil {
+		storePool.Close()
+		closeAlreadyBuilt()
+		return nil, fmt.Errorf("bringup: Store redis: %w", redisErr)
+	}
+
+	// Build the Store's lifecycle.Service over an UNSTARTED
+	// persistence.Component. The Store never calls EnqueueClosedTrade (the
+	// closed-trade drainer belongs on the live per-shard bundles), so the
+	// Component's drainer is never Started and no goroutine spawns here.
+	// Match capstone.Wire's prod config: empty KeyNamespace so keys match
+	// LAYER_5_PERSISTENCE §7 verbatim.
+	storePersistCfg := persistence.Config{KeyNamespace: ""}
+	storePersist := persistence.NewComponent(storePool, storeRedis, stack.Adapter, storePersistCfg)
+	// NOTE: no storePersist.Start — unstarted by design.
+	storeLifecycle := lifecycle.NewService(storePersist)
+
+	brokerStore := store.NewStore(storePool, storeRedis, storeLifecycle)
 	brokerInstance := funnel.NewBroker(brokerCfg.BrokerID, brokerCfg.InboxDepth, bundles, brokerStore)
 	brokerInstance.Start()
 
@@ -116,6 +140,7 @@ func bringUp(ctx context.Context, brokerCfg BrokerConfig, infraCfg config.Config
 		"inbox_depth", brokerCfg.InboxDepth,
 		"country", brokerCfg.Country,
 		"store_max_conns", brokerCfg.storeMaxConnsOrDefault(),
+		"store_lifecycle", "unstarted-component",
 	)
 	return &Runtime{
 		Broker:  brokerInstance,
