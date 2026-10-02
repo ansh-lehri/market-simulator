@@ -4,8 +4,13 @@ import "errors"
 
 // ErrBrokerTimeout is the sentinel returned by a request/response Broker
 // method whose context deadline (or cancel) fires before the shard's
-// reply lands (BROKER_TIER0 §Point-7 / §8.1). It maps to HTTP 503 at the
-// transport layer.
+// reply lands (BROKER_TIER0 §Point-7 / §8.1).
+//
+// HTTP mapping is owned by the handler of each transport-facing endpoint;
+// Phase 3 locks the transfer endpoint's mapping as HTTP 504 (P3-D3,
+// supersedes the Tier-0 doc's older "503" note). Other endpoints inherit
+// the same 504 convention from BROKER_READ_SURFACES tier-4 §0.5. The
+// sentinel value itself is transport-agnostic.
 //
 // A timeout is the CALLER's problem, not the shard's: the shard still
 // processes the command (already in its inbox) and still fires the
