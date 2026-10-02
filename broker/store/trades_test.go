@@ -64,7 +64,7 @@ func TestRecentTrades_HappyPath_NewestFirst(t *testing.T) {
 
 	accountID := seedAccountAndThreeTrades(t, pool, prefix, 500, 1000, 1500)
 
-	store := NewStore(pool)
+	store := newPoolOnlyStore(pool)
 	trades, err := store.RecentTrades(context.Background(), accountID, 10)
 	if err != nil {
 		t.Fatalf("RecentTrades: %v", err)
@@ -93,7 +93,7 @@ func TestRecentTrades_NAboveSeededReturnsAll(t *testing.T) {
 
 	accountID := seedAccountAndThreeTrades(t, pool, prefix, 100, 200, 300)
 
-	store := NewStore(pool)
+	store := newPoolOnlyStore(pool)
 	trades, err := store.RecentTrades(context.Background(), accountID, 100)
 	if err != nil {
 		t.Fatalf("RecentTrades: %v", err)
@@ -112,7 +112,7 @@ func TestRecentTrades_EmptyAccountReturnsEmpty(t *testing.T) {
 	accountID := prefix + "-acc"
 	seedAccount(t, pool, accountID, "agent", prefix+"-owner", 0, 0)
 
-	store := NewStore(pool)
+	store := newPoolOnlyStore(pool)
 	trades, err := store.RecentTrades(context.Background(), accountID, 10)
 	if err != nil {
 		t.Fatalf("RecentTrades: %v", err)
@@ -133,7 +133,7 @@ func TestRecentTrades_ZeroN_Shortcut(t *testing.T) {
 
 	accountID := seedAccountAndThreeTrades(t, pool, prefix, 100, 200, 300)
 
-	store := NewStore(pool)
+	store := newPoolOnlyStore(pool)
 	trades, err := store.RecentTrades(context.Background(), accountID, 0)
 	if err != nil {
 		t.Fatalf("RecentTrades(n=0): %v", err)
@@ -149,7 +149,7 @@ func TestRecentTrades_ZeroN_Shortcut(t *testing.T) {
 // Negative n: same shortcut as n == 0 (both branches of the guard).
 func TestRecentTrades_NegativeN_Shortcut(t *testing.T) {
 	pool := requirePostgresPool(t)
-	store := NewStore(pool)
+	store := newPoolOnlyStore(pool)
 
 	trades, err := store.RecentTrades(context.Background(), "any", -5)
 	if err != nil {
@@ -174,7 +174,7 @@ func TestRecentTrades_FiltersByAccount(t *testing.T) {
 	seedTrade(t, pool, makeTradeSeed(accA, prefix+"-trdA1", 0, 100, 10, 90))
 	seedTrade(t, pool, makeTradeSeed(accB, prefix+"-trdB1", 0, 200, 20, 180))
 
-	store := NewStore(pool)
+	store := newPoolOnlyStore(pool)
 	tradesA, err := store.RecentTrades(context.Background(), accA, 10)
 	if err != nil {
 		t.Fatalf("RecentTrades(A): %v", err)
@@ -201,7 +201,7 @@ func TestTradePage_NewestPage_BeforeNil(t *testing.T) {
 
 	accountID := seedAccountAndThreeTrades(t, pool, prefix, 100, 200, 300)
 
-	store := NewStore(pool)
+	store := newPoolOnlyStore(pool)
 	trades, err := store.TradePage(context.Background(), accountID, 10, nil)
 	if err != nil {
 		t.Fatalf("TradePage: %v", err)
@@ -228,7 +228,7 @@ func TestTradePage_WalksPagesWithCursor(t *testing.T) {
 		seedTrade(t, pool, trade)
 	}
 
-	store := NewStore(pool)
+	store := newPoolOnlyStore(pool)
 
 	var pages [][]TradeRow
 	var cursor *time.Time
@@ -274,7 +274,7 @@ func TestTradePage_Determinism(t *testing.T) {
 
 	accountID := seedAccountAndThreeTrades(t, pool, prefix, 100, 200, 300)
 
-	store := NewStore(pool)
+	store := newPoolOnlyStore(pool)
 	first, err := store.TradePage(context.Background(), accountID, 10, nil)
 	if err != nil {
 		t.Fatalf("TradePage first: %v", err)
@@ -296,7 +296,7 @@ func TestTradePage_Determinism(t *testing.T) {
 // limit <= 0 shortcut, both branches.
 func TestTradePage_ZeroLimit_Shortcut(t *testing.T) {
 	pool := requirePostgresPool(t)
-	store := NewStore(pool)
+	store := newPoolOnlyStore(pool)
 	trades, err := store.TradePage(context.Background(), "any", 0, nil)
 	if err != nil || len(trades) != 0 {
 		t.Errorf("TradePage(limit=0): len=%d err=%v, want len=0 err=nil", len(trades), err)
@@ -305,7 +305,7 @@ func TestTradePage_ZeroLimit_Shortcut(t *testing.T) {
 
 func TestTradePage_NegativeLimit_Shortcut(t *testing.T) {
 	pool := requirePostgresPool(t)
-	store := NewStore(pool)
+	store := newPoolOnlyStore(pool)
 	trades, err := store.TradePage(context.Background(), "any", -1, nil)
 	if err != nil || len(trades) != 0 {
 		t.Errorf("TradePage(limit=-1): len=%d err=%v, want len=0 err=nil", len(trades), err)
@@ -327,7 +327,7 @@ func TestPnLSummary_HappyPath_MixedWinsLosses(t *testing.T) {
 	seedTrade(t, pool, makeTradeSeed(accountID, prefix+"-loss", 1, -500, 100, -600))    // net -600
 	seedTrade(t, pool, makeTradeSeed(accountID, prefix+"-breakeven", 2, 100, 100, 0))   // net 0 (counted in neither)
 
-	store := NewStore(pool)
+	store := newPoolOnlyStore(pool)
 	summary, err := store.PnLSummary(context.Background(), accountID)
 	if err != nil {
 		t.Fatalf("PnLSummary: %v", err)
@@ -361,7 +361,7 @@ func TestPnLSummary_EmptyAccountReturnsZeros(t *testing.T) {
 	accountID := prefix + "-acc"
 	seedAccount(t, pool, accountID, "agent", prefix+"-owner", 0, 0)
 
-	store := NewStore(pool)
+	store := newPoolOnlyStore(pool)
 	summary, err := store.PnLSummary(context.Background(), accountID)
 	if err != nil {
 		t.Fatalf("PnLSummary: %v", err)

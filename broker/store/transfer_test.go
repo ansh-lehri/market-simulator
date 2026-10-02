@@ -22,7 +22,7 @@ func TestDurableTransfer_ToTrading_Success(t *testing.T) {
 	accountID := prefix + "-acc"
 	seedAccount(t, pool, accountID, "agent", prefix+"-owner", 100, 50)
 
-	store := NewStore(pool)
+	store := newPoolOnlyStore(pool)
 	available, bank, err := store.DurableTransfer(context.Background(), accountID, ToTrading, 20)
 	if err != nil {
 		t.Fatalf("DurableTransfer: %v", err)
@@ -48,7 +48,7 @@ func TestDurableTransfer_ToBank_Success(t *testing.T) {
 	accountID := prefix + "-acc"
 	seedAccount(t, pool, accountID, "agent", prefix+"-owner", 100, 50)
 
-	store := NewStore(pool)
+	store := newPoolOnlyStore(pool)
 	available, bank, err := store.DurableTransfer(context.Background(), accountID, ToBank, 20)
 	if err != nil {
 		t.Fatalf("DurableTransfer: %v", err)
@@ -76,7 +76,7 @@ func TestDurableTransfer_ToTrading_Insufficient(t *testing.T) {
 	accountID := prefix + "-acc"
 	seedAccount(t, pool, accountID, "agent", prefix+"-owner", 100, 10)
 
-	store := NewStore(pool)
+	store := newPoolOnlyStore(pool)
 	_, _, err := store.DurableTransfer(context.Background(), accountID, ToTrading, 20)
 	if !errors.Is(err, ErrInsufficient) {
 		t.Fatalf("err: got %v, want ErrInsufficient", err)
@@ -98,7 +98,7 @@ func TestDurableTransfer_ToBank_Insufficient(t *testing.T) {
 	accountID := prefix + "-acc"
 	seedAccount(t, pool, accountID, "agent", prefix+"-owner", 10, 100)
 
-	store := NewStore(pool)
+	store := newPoolOnlyStore(pool)
 	_, _, err := store.DurableTransfer(context.Background(), accountID, ToBank, 20)
 	if !errors.Is(err, ErrInsufficient) {
 		t.Fatalf("err: got %v, want ErrInsufficient", err)
@@ -120,7 +120,7 @@ func TestDurableTransfer_ToBank_InsufficientWhenInDebt(t *testing.T) {
 	accountID := prefix + "-acc"
 	seedAccount(t, pool, accountID, "agent", prefix+"-owner", -100, 50)
 
-	store := NewStore(pool)
+	store := newPoolOnlyStore(pool)
 	_, _, err := store.DurableTransfer(context.Background(), accountID, ToBank, 10)
 	if !errors.Is(err, ErrInsufficient) {
 		t.Fatalf("err: got %v, want ErrInsufficient (debt is not spendable)", err)
@@ -138,7 +138,7 @@ func TestDurableTransfer_ToTrading_ReducesDebt(t *testing.T) {
 	accountID := prefix + "-acc"
 	seedAccount(t, pool, accountID, "agent", prefix+"-owner", -500, 1000)
 
-	store := NewStore(pool)
+	store := newPoolOnlyStore(pool)
 	available, bank, err := store.DurableTransfer(context.Background(), accountID, ToTrading, 200)
 	if err != nil {
 		t.Fatalf("DurableTransfer: %v", err)
@@ -152,7 +152,7 @@ func TestDurableTransfer_ToTrading_ReducesDebt(t *testing.T) {
 
 func TestDurableTransfer_ToTrading_MissingAccount(t *testing.T) {
 	pool := requirePostgresPool(t)
-	store := NewStore(pool)
+	store := newPoolOnlyStore(pool)
 
 	_, _, err := store.DurableTransfer(context.Background(), "nonexistent-acc", ToTrading, 1)
 	if !errors.Is(err, ErrNoAccount) {
@@ -162,7 +162,7 @@ func TestDurableTransfer_ToTrading_MissingAccount(t *testing.T) {
 
 func TestDurableTransfer_ToBank_MissingAccount(t *testing.T) {
 	pool := requirePostgresPool(t)
-	store := NewStore(pool)
+	store := newPoolOnlyStore(pool)
 
 	_, _, err := store.DurableTransfer(context.Background(), "nonexistent-acc", ToBank, 1)
 	if !errors.Is(err, ErrNoAccount) {
@@ -178,7 +178,7 @@ func TestDurableTransfer_ToBank_MissingAccount(t *testing.T) {
 // not ErrBadTransfer.
 func TestDurableTransfer_ZeroAmount(t *testing.T) {
 	pool := requirePostgresPool(t)
-	store := NewStore(pool)
+	store := newPoolOnlyStore(pool)
 
 	_, _, err := store.DurableTransfer(context.Background(), "any-acc", ToTrading, 0)
 	if !errors.Is(err, ErrBadTransfer) {
@@ -189,7 +189,7 @@ func TestDurableTransfer_ZeroAmount(t *testing.T) {
 // Negative amount, both branches of the sign guard.
 func TestDurableTransfer_NegativeAmount(t *testing.T) {
 	pool := requirePostgresPool(t)
-	store := NewStore(pool)
+	store := newPoolOnlyStore(pool)
 
 	_, _, err := store.DurableTransfer(context.Background(), "any-acc", ToTrading, -5)
 	if !errors.Is(err, ErrBadTransfer) {
@@ -201,7 +201,7 @@ func TestDurableTransfer_NegativeAmount(t *testing.T) {
 // constant) — ErrBadTransfer. Proves the "unset direction" trap.
 func TestDurableTransfer_ZeroDirection(t *testing.T) {
 	pool := requirePostgresPool(t)
-	store := NewStore(pool)
+	store := newPoolOnlyStore(pool)
 
 	_, _, err := store.DurableTransfer(context.Background(), "any-acc", TransferDirection(0), 10)
 	if !errors.Is(err, ErrBadTransfer) {
@@ -212,7 +212,7 @@ func TestDurableTransfer_ZeroDirection(t *testing.T) {
 // Out-of-range direction — any value past ToBank. Same ErrBadTransfer.
 func TestDurableTransfer_OutOfRangeDirection(t *testing.T) {
 	pool := requirePostgresPool(t)
-	store := NewStore(pool)
+	store := newPoolOnlyStore(pool)
 
 	_, _, err := store.DurableTransfer(context.Background(), "any-acc", TransferDirection(99), 10)
 	if !errors.Is(err, ErrBadTransfer) {
@@ -233,7 +233,7 @@ func TestDurableTransfer_CancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	store := NewStore(pool)
+	store := newPoolOnlyStore(pool)
 	_, _, err := store.DurableTransfer(ctx, accountID, ToTrading, 10)
 	if err == nil {
 		t.Fatal("DurableTransfer(cancelled): got nil err, want infra failure")
@@ -316,7 +316,7 @@ func TestDurableTransfer_Conservation(t *testing.T) {
 		{"to_bank_all_trading", 500, 100, ToBank, 500},
 		{"to_trading_debt_reduces", -200, 1000, ToTrading, 150},
 	}
-	store := NewStore(pool)
+	store := newPoolOnlyStore(pool)
 	for caseIndex, testCase := range cases {
 		testCase := testCase
 		t.Run(testCase.name, func(subtest *testing.T) {

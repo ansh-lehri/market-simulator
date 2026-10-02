@@ -18,7 +18,7 @@ func TestAccountHandle_HappyPath_AgentOwner(t *testing.T) {
 	ownerID := prefix + "-owner"
 	seedAccount(t, pool, accountID, "agent", ownerID, 100_000, 50_000)
 
-	store := NewStore(pool)
+	store := newPoolOnlyStore(pool)
 	got, err := store.AccountHandle(context.Background(), "agent", ownerID)
 	if err != nil {
 		t.Fatalf("AccountHandle: got err %v, want nil", err)
@@ -40,7 +40,7 @@ func TestAccountHandle_HappyPath_HumanOwner(t *testing.T) {
 	ownerID := prefix + "-owner"
 	seedAccount(t, pool, accountID, "human", ownerID, 200_000, 0)
 
-	store := NewStore(pool)
+	store := newPoolOnlyStore(pool)
 	got, err := store.AccountHandle(context.Background(), "human", ownerID)
 	if err != nil {
 		t.Fatalf("AccountHandle: got err %v, want nil", err)
@@ -60,7 +60,7 @@ func TestAccountHandle_UnknownOwnerID(t *testing.T) {
 
 	seedAccount(t, pool, prefix+"-acc", "agent", prefix+"-owner", 100_000, 0)
 
-	store := NewStore(pool)
+	store := newPoolOnlyStore(pool)
 	_, err := store.AccountHandle(context.Background(), "agent", prefix+"-nope")
 	if !errors.Is(err, ErrNoAccount) {
 		t.Fatalf("AccountHandle(agent, <missing>): got %v, want ErrNoAccount", err)
@@ -79,7 +79,7 @@ func TestAccountHandle_WrongOwnerType(t *testing.T) {
 	ownerID := prefix + "-owner"
 	seedAccount(t, pool, prefix+"-acc", "agent", ownerID, 100_000, 0)
 
-	store := NewStore(pool)
+	store := newPoolOnlyStore(pool)
 	_, err := store.AccountHandle(context.Background(), "human", ownerID)
 	if !errors.Is(err, ErrNoAccount) {
 		t.Fatalf("AccountHandle(human, <agent-owner>): got %v, want ErrNoAccount", err)
@@ -101,7 +101,7 @@ func TestAccountHandle_OwnerTypeDisambiguation(t *testing.T) {
 	seedAccount(t, pool, agentAccountID, "agent", sharedOwnerID, 100_000, 0)
 	seedAccount(t, pool, humanAccountID, "human", sharedOwnerID, 200_000, 0)
 
-	store := NewStore(pool)
+	store := newPoolOnlyStore(pool)
 	gotAgent, err := store.AccountHandle(context.Background(), "agent", sharedOwnerID)
 	if err != nil {
 		t.Fatalf("AccountHandle(agent): %v", err)
@@ -122,7 +122,7 @@ func TestAccountHandle_OwnerTypeDisambiguation(t *testing.T) {
 // error, surfaced as ErrLoadFailed-wrapped. No SQL is issued.
 func TestAccountHandle_EmptyOwnerType(t *testing.T) {
 	pool := requirePostgresPool(t)
-	store := NewStore(pool)
+	store := newPoolOnlyStore(pool)
 
 	_, err := store.AccountHandle(context.Background(), "", "some-owner")
 	if !errors.Is(err, ErrLoadFailed) {
@@ -135,7 +135,7 @@ func TestAccountHandle_EmptyOwnerType(t *testing.T) {
 // both branches of a symmetric guard).
 func TestAccountHandle_EmptyOwnerID(t *testing.T) {
 	pool := requirePostgresPool(t)
-	store := NewStore(pool)
+	store := newPoolOnlyStore(pool)
 
 	_, err := store.AccountHandle(context.Background(), "agent", "")
 	if !errors.Is(err, ErrLoadFailed) {
@@ -156,7 +156,7 @@ func TestAccountHandle_CancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	store := NewStore(pool)
+	store := newPoolOnlyStore(pool)
 	_, err := store.AccountHandle(ctx, "agent", prefix+"-owner")
 	if err == nil {
 		t.Fatal("AccountHandle(cancelled): got nil err, want infra failure")
@@ -183,7 +183,7 @@ func TestAccountHandle_FastPathTimeout(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	store := NewStore(pool)
+	store := newPoolOnlyStore(pool)
 	if _, err := store.AccountHandle(ctx, "agent", prefix+"-owner"); err != nil {
 		t.Fatalf("AccountHandle under 5s budget: %v", err)
 	}

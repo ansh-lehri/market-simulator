@@ -52,7 +52,7 @@ func TestCostsPerTradeIN_HappyPath_AllLinesSurface(t *testing.T) {
 			india.LineAutosquareFee: 5000,
 		}, 5049)
 
-	store := NewStore(pool)
+	store := newPoolOnlyStore(pool)
 	rows, err := store.CostsPerTradeIN(context.Background(), accountID, 10, nil)
 	if err != nil {
 		t.Fatalf("CostsPerTradeIN: %v", err)
@@ -108,7 +108,7 @@ func TestCostsPerTradeIN_DropsZeroLines(t *testing.T) {
 			india.LineGST:      5,
 		}, 34)
 
-	store := NewStore(pool)
+	store := newPoolOnlyStore(pool)
 	rows, err := store.CostsPerTradeIN(context.Background(), accountID, 10, nil)
 	if err != nil {
 		t.Fatalf("CostsPerTradeIN: %v", err)
@@ -146,7 +146,7 @@ func TestCostsPerTradeIN_FiltersByAccountThroughJoin(t *testing.T) {
 	seedIndiaTradeWithCosts(t, pool, accOther, prefix+"-trd-other", 0,
 		map[string]int64{india.LineSTT: 99}, 99)
 
-	store := NewStore(pool)
+	store := newPoolOnlyStore(pool)
 	rows, err := store.CostsPerTradeIN(context.Background(), accMine, 10, nil)
 	if err != nil {
 		t.Fatalf("CostsPerTradeIN: %v", err)
@@ -171,7 +171,7 @@ func TestCostsPerTradeIN_WalksPagesWithCursor(t *testing.T) {
 			map[string]int64{india.LineSTT: int64(10 * (tradeIndex + 1))}, int64(10*(tradeIndex+1)))
 	}
 
-	store := NewStore(pool)
+	store := newPoolOnlyStore(pool)
 	var pages [][]TradeCostBreakdown
 	var cursor *time.Time
 	for pageIndex := 0; pageIndex < 10; pageIndex++ {
@@ -211,7 +211,7 @@ func pageSizes(pages [][]TradeCostBreakdown) []int {
 // Shortcut on limit <= 0 — both branches.
 func TestCostsPerTradeIN_ZeroLimit_Shortcut(t *testing.T) {
 	pool := requirePostgresPool(t)
-	store := NewStore(pool)
+	store := newPoolOnlyStore(pool)
 	rows, err := store.CostsPerTradeIN(context.Background(), "any", 0, nil)
 	if err != nil || len(rows) != 0 {
 		t.Errorf("CostsPerTradeIN(limit=0): len=%d err=%v, want 0/nil", len(rows), err)
@@ -220,7 +220,7 @@ func TestCostsPerTradeIN_ZeroLimit_Shortcut(t *testing.T) {
 
 func TestCostsPerTradeIN_NegativeLimit_Shortcut(t *testing.T) {
 	pool := requirePostgresPool(t)
-	store := NewStore(pool)
+	store := newPoolOnlyStore(pool)
 	rows, err := store.CostsPerTradeIN(context.Background(), "any", -1, nil)
 	if err != nil || len(rows) != 0 {
 		t.Errorf("CostsPerTradeIN(limit=-1): len=%d err=%v, want 0/nil", len(rows), err)
@@ -250,7 +250,7 @@ func TestCostsAggregateIN_HappyPath(t *testing.T) {
 			}, 5030)
 	}
 
-	store := NewStore(pool)
+	store := newPoolOnlyStore(pool)
 	agg, err := store.CostsAggregateIN(context.Background(), accountID)
 	if err != nil {
 		t.Fatalf("CostsAggregateIN: %v", err)
@@ -291,7 +291,7 @@ func TestCostsAggregateIN_EmptyAccountReturnsZeros(t *testing.T) {
 	accountID := prefix + "-acc"
 	seedAccount(t, pool, accountID, "agent", prefix+"-owner", 0, 0)
 
-	store := NewStore(pool)
+	store := newPoolOnlyStore(pool)
 	agg, err := store.CostsAggregateIN(context.Background(), accountID)
 	if err != nil {
 		t.Fatalf("CostsAggregateIN: %v", err)
@@ -324,7 +324,7 @@ func TestCostsAggregateIN_FiltersByAccountThroughJoin(t *testing.T) {
 	seedIndiaTradeWithCosts(t, pool, accOther, prefix+"-trd-other", 0,
 		map[string]int64{india.LineSTT: 999}, 999)
 
-	store := NewStore(pool)
+	store := newPoolOnlyStore(pool)
 	agg, err := store.CostsAggregateIN(context.Background(), accMine)
 	if err != nil {
 		t.Fatalf("CostsAggregateIN: %v", err)
