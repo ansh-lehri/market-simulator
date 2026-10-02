@@ -18,8 +18,8 @@ func (ownerShard *shard) dispatch(cmd Command) {
 		typedCmd.ReplyTo <- ownerShard.handlePlaceOrder(typedCmd)
 	case CancelOrder:
 		typedCmd.ReplyTo <- ownerShard.handleCancel(typedCmd)
-	case BankMove:
-		typedCmd.ReplyTo <- ownerShard.handleBankMove(typedCmd)
+	case Transfer:
+		typedCmd.ReplyTo <- ownerShard.handleTransfer(typedCmd)
 	case ReadBalance:
 		typedCmd.ReplyTo <- ownerShard.handleReadBalance(typedCmd)
 	case ReadPositions:
@@ -68,11 +68,19 @@ func (ownerShard *shard) handleCancel(cmd CancelOrder) CancelResult {
 	return CancelResult{}
 }
 
-// handleBankMove is the Tier-3 bank-move seam (Stage 1 of the transfer
-// design — the Stage-2 durableTransfer is off-shard, on the Store).
-func (ownerShard *shard) handleBankMove(cmd BankMove) BankResult {
+// handleTransfer is the Tier-3 bank-move seam — the in-session Stage-1
+// branch of the Phase-3 design (BROKER_PHASE3 §2.2). Phase-3 Stage A
+// leaves the body as the Phase-0 empty echo so dispatch stays well-typed;
+// Stage B fills the real body (XOR + MoveCash + MarkSnapshotDirty +
+// mode-blind {Available, Bank} reply).
+//
+// The zero value returned here is TransferResult{Present:false}; no HTTP
+// handler exists in Stage A, so nothing acts on it. The off-shard Stage-2
+// durable transfer (store.DurableTransfer) is composed by the Phase-3
+// HTTP handler, not here (P3-D4).
+func (ownerShard *shard) handleTransfer(cmd Transfer) TransferResult {
 	_ = cmd
-	return BankResult{}
+	return TransferResult{}
 }
 
 // handleReadBalance is the Tier-4 live-balance-read seam. The copy-out
