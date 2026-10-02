@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"simulator/contract"
+	"simulator/economy/account"
 	"simulator/economy/capstone"
 	"simulator/economy/reserve"
 )
@@ -180,17 +181,41 @@ func (broker *Broker) CancelOrder(ctx context.Context, accountID AccountID, orde
 	}
 }
 
-// BankMove requests a bank ↔ trading transfer for the given account.
-// Amount is strictly positive; direction is carried by dir (root value
-// discipline). Body owned by Tier 3.
-func (broker *Broker) BankMove(ctx context.Context, accountID AccountID, dir BankDir, amount int64) (BankResult, error) {
-	replyChannel := make(chan BankResult, 1)
-	broker.route(BankMove{AccountID: accountID, Dir: dir, Amount: amount, ReplyTo: replyChannel})
+// Transfer requests a bank ↔ trading cash move for the given account.
+// Amount is strictly positive; direction is encoded by which (fromBucket,
+// toBucket) pair the caller passes — toBank push is (Available, Bank),
+// toTrading pull is (Bank, Available). The caller (the broker/transfer
+// HTTP handler, Phase-3 P3-D2) owns the one direction→buckets mapping.
+//
+// Thin shard round-trip mirror of PlaceOrder (P3-D4): a fresh buffered(1)
+// reply channel, route onto the owning shard, select on reply vs ctx. The
+// durable-on-miss orchestration (Present:false → Store.DurableTransfer)
+// does NOT live here — it is the HTTP handler's job (P3-D4). This method
+// returns whatever the shard replied, verbatim.
+//
+// Caller timed out but shard ran the command → the result value drops
+// into the buffered-1 reply and is garbage-collected; the money may still
+// have moved, same reconciliation rule as PlaceOrder (BROKER_TIER0 §7).
+func (broker *Broker) Transfer(
+	ctx context.Context,
+	accountID AccountID,
+	fromBucket account.Bucket,
+	toBucket account.Bucket,
+	amount int64,
+) (TransferResult, error) {
+	replyChannel := make(chan TransferResult, 1)
+	broker.route(Transfer{
+		AccountID: accountID,
+		From:      fromBucket,
+		To:        toBucket,
+		Amount:    amount,
+		ReplyTo:   replyChannel,
+	})
 	select {
 	case reply := <-replyChannel:
 		return reply, nil
 	case <-ctx.Done():
-		return BankResult{}, ErrBrokerTimeout
+		return TransferResult{}, ErrBrokerTimeout
 	}
 }
 
