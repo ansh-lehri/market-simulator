@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"simulator/contract"
+	"simulator/economy/account"
 	"simulator/economy/capstone"
 )
 
@@ -75,7 +76,7 @@ func TestStress_MixedCommandsAcrossShards(t *testing.T) {
 					}
 				case 2:
 					atomic.AddUint64(&submittedRequests, 1)
-					if _, err := brokerUnderTest.BankMove(ctx, accountID, PullToTrading, 100); err == nil {
+					if _, err := brokerUnderTest.Transfer(ctx, accountID, account.Bank, account.Available, 100); err == nil {
 						atomic.AddUint64(&receivedReplies, 1)
 					}
 				case 3:
