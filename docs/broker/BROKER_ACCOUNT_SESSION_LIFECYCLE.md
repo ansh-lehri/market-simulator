@@ -141,11 +141,17 @@ The gate must be a broker method — L7 is money-blind and can't read accounts; 
 
 broker.QualifyOnDemand(accountID):                        // OFF-shard; no live account exists (XOR)
   SELECT trading_cash FROM accounts WHERE account_id = $1     // durable read (Store wrapper, per Tier 4)
-    no row      → false, ErrNoAccount      // EnsureAccount ran first; missing = bug
+    no row      → false, ErrNoAccount                       // EnsureAccount ran first; missing = bug
     query error → false, ErrLoadFailed
-    row         → (row.trading_cash >= onDemandMinimum, nil)
+    row         → if row.trading_cash < 0 → (false, nil)    // Rule 1: debt never qualifies (explicit)
+                  else                    → (row.trading_cash > onDemandMinimum, nil)   // Rule 2: strict >
 
 onDemandMinimum is the broker/economy threshold (L7 A2.8: "the broker's/economy's number"). It is an un-valued economy dial today (same category as starting capital); the economy §3.5 rule "0 or negative → blocked" is its guaranteed floor, the dial can sit above. The gate is a pure read — returns a boolean, moves nothing.
+
+Gate semantics (Stage-D locks, see BROKER_PHASE2_IMPLEMENTATION_DESIGN.md P2-2·D4/D5 — authoritative; this doc tracks):
+- Rule 1 (debt): `trading_cash < 0` → false, independent of onDemandMinimum. Explicit guard so a future validation relaxation (negative floors / incentives) cannot silently let a debtor through.
+- Rule 2 (strict): `trading_cash > onDemandMinimum`, NOT `>=`. Equal-to-floor does NOT qualify. Zero min therefore means "any strictly-positive balance qualifies," not "any non-negative balance qualifies."
+The earlier `>= onDemandMinimum` shorthand in this doc's edge-cases list below is superseded by the above rules.
 
 broker.StartSession(cmd) where cmd.Mode == OnDemand:      // OFF-shard, on L7's spin-up goroutine
   1. if cmd.ExchangeInbound == nil → ErrBadBinding ; if cmd.Participant == "" → ErrBadParticipant
@@ -166,8 +172,9 @@ Verified facts (from ondemand_session_load, §4): the bank pool is copied (Bank:
 
 Edge cases.
 
-trading_cash >= onDemandMinimum → yes.
-trading_cash < onDemandMinimum → no. B9 returns false; whatever the user does next (top up, retry, or not) is entirely outside this flow. On a retry, the seal reads the then-current balance.
+trading_cash > onDemandMinimum (strict) → yes. Equal-to-floor fails (gate is `>`, not `>=`).
+trading_cash <= onDemandMinimum and >= 0 → no. B9 returns false; whatever the user does next (top up, retry, or not) is entirely outside this flow. On a retry, the seal reads the then-current balance.
+trading_cash < 0 (debt) → no, independent of onDemandMinimum (Rule 1: explicit debt-rejection guard; see decision log P2-2·D4).
 ErrNoAccount at gate → can't happen legitimately → bug → bubble, loud log.
 ErrLoadFailed at gate (Postgres down) → bubble; no state created.
 ErrNoAccount at seal → even less likely (gate confirmed existence) → log, bubble.
