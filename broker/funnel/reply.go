@@ -11,10 +11,11 @@ import "context"
 // Scope: this helper is intentionally specific to `chan error` and takes
 // a receive-only channel so a caller cannot accidentally send on the
 // shard's reply slot. The five existing typed request/response entry
-// points (PlaceOrder, CancelOrder, BankMove, ReadBalance, ReadPositions)
+// points (PlaceOrder, CancelOrder, Transfer, ReadBalance, ReadPositions)
 // keep their inlined `select` because their reply channels carry typed
-// payloads (PlaceResult / CancelResult / ...); refactoring those to a
-// generic helper is a separate increment, not part of Phase 2.
+// payloads (PlaceResult / CancelResult / TransferResult / ...);
+// refactoring those to a generic helper is a separate increment, not
+// part of Phase 2.
 //
 // Ctx-timeout semantics mirror the inlined pattern: the shard still
 // processes the command (already in its inbox) and still sends on the
