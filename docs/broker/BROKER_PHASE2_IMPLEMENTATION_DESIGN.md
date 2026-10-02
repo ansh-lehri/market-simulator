@@ -83,17 +83,27 @@ func (s *Store) TradingCash(ctx, accountID AccountID) (int64, error)
 Broker.QualifyOnDemand(ctx, accountID) (ok bool, err error):     // OFF-shard, pure read
   cash, err := b.store.TradingCash(ctx, accountID)
   switch {
-    err == nil:                   return cash >= b.cfg.OnDemandMinimum, nil
+    err == nil:
+        if cash < 0 { return false, nil }                        // Rule 1: debt never qualifies
+        return cash > b.cfg.OnDemandMinimum, nil                 // Rule 2: strict > (NOT >=)
     errors.Is(err, ErrNoAccount): return false, ErrNoAccount     // EnsureAccount ran first → missing = bug
     default:                       return false, ErrLoadFailed    // Postgres down; nothing created
   }
 
-ok=false, err=nil on a legit under-balance is not an error — it's a valid "no." trading_cash is signed (debt is legal, no CHECK(>=0)), so a user in debt reads negative and cleanly fails the >=. Exactly one Postgres read, zero writes, no Redis.
+The gate has two conjoined rules (locked at Stage D):
+
+Rule 1 — debt never qualifies. `trading_cash < 0` returns false regardless of OnDemandMinimum. OnDemandMinimum is non-negative at bringup (BrokerConfig validate >= 0), so the strict comparison alone would also reject debt — but the rule is asserted EXPLICITLY so a future validation relaxation (negative floors, incentives, etc.) does not silently let a debtor through. Load-bearing property of the gate, not an implementation detail of the min.
+
+Rule 2 — strict greater-than. `trading_cash > OnDemandMinimum`. A balance equal to the floor does NOT qualify — the user must be strictly above the bar. Zero min therefore means "any strictly-positive balance qualifies," NOT "any non-negative balance qualifies." Earlier shorthand of `cash >= min` in this doc is superseded by P2-2·D4 / D5.
+
+ok=false, err=nil on a legit under-balance (or a debt) is not an error — it's a valid "no." trading_cash is signed (debt is legal, no CHECK(>=0)); Rule 1 catches debt explicitly, Rule 2 catches the "insufficient-but-non-negative" case. Exactly one Postgres read, zero writes, no Redis.
 
 Decision log
 P2-2·D1 — broker method returning a bare boolean; L7 never sees balance or threshold (honors L7 A2.8). Pure read, off-shard, no state, no money moved. LOCKED
 P2-2·D2 — new Store read primitive TradingCash(accountID); reuses ErrNoAccount / ErrLoadFailed. LOCKED
 P2-2·D3 — onDemandMinimum is a BrokerConfig dial (value open, home fixed); economy's "≤0 → blocked" is a separate guaranteed floor the dial may sit above. LOCKED
+P2-2·D4 — explicit debt-rejection guard. `trading_cash < 0` returns (false, nil) BEFORE the min comparison, independent of OnDemandMinimum's value. Rationale: the design intent "no debtor qualifies" must survive any future relaxation of the min's non-negative invariant; a strict > with min >= 0 covers debt mathematically today, but the explicit guard pins the semantics in code where readers find them. LOCKED
+P2-2·D5 — strict greater-than, not greater-or-equal. `cash > min`, not `cash >= min`. A balance equal to the floor does NOT qualify; the user must be strictly above the bar. Zero min therefore means "any strictly-positive balance qualifies." Supersedes the earlier shorthand `cash >= min` in the Design pseudocode above (and in the earlier BROKER_ACCOUNT_SESSION_LIFECYCLE.md §Stage-3 sketch; the implementation + this doc are now the authority). LOCKED
 3. Point 3 — StartSession (+ InstallSession) — LOCKED
 Intent
 
@@ -207,6 +217,8 @@ P2-1·D4	Starting capital/bank are BrokerConfig dials (value open, home fixed)	L
 P2-2·D1	QualifyOnDemand returns a bare boolean; L7 money-blind (A2.8)	LOCKED
 P2-2·D2	New Store read TradingCash(accountID); reuses ErrNoAccount/ErrLoadFailed	LOCKED
 P2-2·D3	onDemandMinimum is a BrokerConfig dial; economy floor is separate	LOCKED
+P2-2·D4	Explicit debt-rejection guard: cash < 0 → (false, nil) BEFORE the min comparison, independent of OnDemandMinimum	LOCKED
+P2-2·D5	Strict greater-than, not greater-or-equal: cash > min (equal-to-floor does NOT qualify); supersedes the earlier cash >= min shorthand	LOCKED
 P2-3·D1	One StartSession; Mode selects loader; install handler identical	LOCKED
 P2-3·D2	InstallSession carries whole LoadedAccount	LOCKED
 P2-3·D3	Off-shard load on the Store's lifecycle.Service; concurrency-safe	LOCKED
