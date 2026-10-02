@@ -28,6 +28,12 @@ func (ownerShard *shard) dispatch(cmd Command) {
 		ownerShard.handleApplyResult(typedCmd)
 	case FireStop:
 		ownerShard.handleFireStop(typedCmd)
+	case InstallSession:
+		// Phase-2 Point 3 — the first command crossing the funnel from
+		// off-shard orchestration to the owner goroutine. Handler is
+		// pure in-memory (XOR + map write + reply); body lives in
+		// install_session.go.
+		ownerShard.handleInstallSession(typedCmd)
 	default:
 		panic(fmt.Sprintf("funnel: shard dispatch: unknown command type %T", cmd))
 	}
