@@ -295,9 +295,11 @@ What it is. The canonical session's teardown: writes the final durable money sta
 
 Precondition — the session is already flat. By the time save runs, auto-square (STL-3, 5.4) has already run: every open position is squared to zero and each closing trade already written to the write-behind buffer (→ participant_trades). So save deals with no positions — they're gone, never persist to Postgres anyway (§3.4), and their P&L already landed in the trade log. What remains is the durable capital only. Ordering is load-bearing: auto-square → trades flushed → THEN session_save. Save is the last teardown step; if it ran before auto-square, trading_cash would miss the final settlement.
 
-Reconciliation — the split collapses to one number. In-memory cash is a split; Postgres holds one signed trading_cash. At clean close the session is flat, so Reserved == 0, and:
+Reconciliation — the split collapses to one number. In-memory cash is a split; Postgres holds one signed trading_cash. Trading_cash at any moment = Available + Reserved. At clean close Reserved == 0 (asserted), so:
 
-trading_cash (durable) = Available + Settled     // Reserved is 0 at clean close (asserted)
+trading_cash (durable) = Available + Reserved     // Reserved is 0 at clean close (asserted), so this collapses to Available
+
+Settled is deliberately excluded — it is a session-only accounting bucket that tracks Reserved→position conversions during the session (accumulates on buy fills via MoveCash(Reserved → Settled)); it is NOT part of trading_cash and is ignored at save. Reseeded to 0 at the next SessionLoad.
 
 Reserved must be zero at clean close — a non-zero value means a resting order survived teardown (a bug), asserted rather than silently folded in.
 
@@ -357,7 +359,7 @@ Why each step
 
 Step 1 guard — on-demand suppression enforced structurally at the write boundary; a mis-route can never corrupt the durable account.
 Step 2 assert flat — the ordering contract with 5.4. Save is last; auto-square precedes it. Reserved cash or a live position at save time means the sequence broke → dev-fatal.
-Step 3 reconcile — collapses the three-way split into the single signed durable figure (Available + Settled, Reserved zero by assert). This is where the session's entire realized outcome lands in one number.
+Step 3 reconcile — collapses the split into the single signed durable figure (Available + Reserved, Reserved zero by assert → effectively just Available; Settled is a session-only bucket, not part of trading_cash). This is where the session's entire realized outcome lands in one number.
 Step 4 one transaction — durability-critical; a single atomic UPDATE of all four durable fields. trading_cash may be negative (Option 4) — no floor, no clamp.
 Step 5 don't-discard-on-failure — if the Postgres write fails, the Redis snapshot is the only surviving copy; keeping it preserves recoverability/retry. Discarding it on a failed save is the one move that actually loses money state.
 Step 6 discard last, non-fatal — the snapshot is obsolete only after the durable write commits; Postgres before Redis-discard, always.
