@@ -6,8 +6,10 @@ import (
 
 	"simulator/contract"
 	"simulator/economy/account"
+	"simulator/economy/capstone"
 	"simulator/economy/cost"
 	"simulator/economy/lifecycle"
+	"simulator/economy/persistence"
 	"simulator/economy/realize"
 	"simulator/economy/reserve"
 )
@@ -156,12 +158,25 @@ func newGoldenHarness(_ *testing.T) *goldenHarness {
 
 	exchange := make(chan contract.InboundMessage, 16)
 
+	// A capstone.Bundle with ONLY Persist wired. The *persistence.Component
+	// is built with nil pool / nil redis / nil adapter — tolerated by
+	// NewComponent (its doc says "nils are tolerated only for tests that
+	// exercise a subset"). MarkSnapshotDirty is pure in-memory map
+	// manipulation and never touches storage, so it works. Any other
+	// Component method would nil-deref — we don't call them from the funnel
+	// handlers under test here. DrainDirty is the non-destructive read tests
+	// use to assert that the dirty flag landed.
+	bundle := &capstone.Bundle{
+		Persist: persistence.NewComponent(nil, nil, nil, persistence.Config{}),
+	}
+
 	assembledShard := &shard{
 		brokerID: goldenBrokerID,
 		sessions: map[AccountID]*ownedSession{},
 		tracks:   map[OrderID]*OrderTrack{},
 		mktCache: nopMarketCache{},
 		resv:     resvSvc,
+		bundle:   bundle,
 	}
 	return &goldenHarness{
 		shard:     assembledShard,
