@@ -63,11 +63,9 @@ func (ownerShard *shard) dispatch(cmd Command) {
 // (BROKER_PHASE5 §1.3). Dispatch above calls the method; this file no
 // longer holds its stub.
 
-// handleCancel is the Tier-1 cancel seam.
-func (ownerShard *shard) handleCancel(cmd CancelOrder) CancelResult {
-	_ = cmd
-	return CancelResult{}
-}
+// handleCancel — Tier-1 cancel body — lives in cancel.go (BROKER_PHASE5
+// §2.3). Dispatch above calls the method; this file no longer holds its
+// stub.
 
 // handleTransfer is the Tier-3 in-session bank-move body (BROKER_PHASE3
 // §2.2, P3-D5/D6/D9). Runs on the owner goroutine; three outcomes:
