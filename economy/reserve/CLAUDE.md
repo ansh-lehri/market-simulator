@@ -24,12 +24,18 @@ sole writer. It is the top of the compute stack: it calls **down** into account,
   `Side`, `IsMarket`, `ReservedCash`/`ReservedUnits`/`RemainingQty`, and the cost-lifecycle flags
   **`OrigQty` / `EverFilled` / `BrokerageCharged`**. Link-back ids only — **never a pointer into an
   `Account`**.
-- **Four methods:**
+- **Five methods** (four writers + one pure read):
   - `ReserveIfAvailable(participant, order) → reserved | reason` — the engine's **one synchronous,
     blocking** consult (Gate 4).
   - `Convert(order_id, fill_qty, maker_price)` — per-fill lifecycle bookkeeping.
   - `Release(order_id, release_qty = all)` — non-fill terminal.
   - `ReleaseExcess(order_id)` — market-buy buffer true-up.
+  - `ViewReservation(order_id) → (ReservationView, ok)` — **pure read**, value-copy
+    projection of a reservation record (`OrderID`, `Side`, `IsMarket`, `ReservedCash`,
+    `ReservedUnits`, `RemainingQty`, `OrigQty`). No mutation, no event, no snapshot mark;
+    unknown id returns `(zero, false)` (legitimate "no live reservation" answer — not a
+    programming-error panic like the writer methods'). Consumed by the broker's Phase-5
+    settlement (`settleMakerFill` completion check) and Phase-6 open-orders read (A11).
 
 ## The core invariant (verbatim §0.1 — the through-line of all four methods)
 > The reservation covers **exactly** the still-unfilled quantity; debits/credits cover **exactly** the
