@@ -46,7 +46,7 @@ type Broker struct {
 }
 
 // NewBroker builds N = len(bundles) shards, one per bundle, each carrying
-// its own per-shard L5 wiring (Point 6). The construction happens BEFORE
+// its own per-shard reservation + realization wiring (Point 6). The construction happens BEFORE
 // Start spawns any goroutine, so touching the shard slice here is
 // single-threaded and safe without a lock.
 //
@@ -75,7 +75,12 @@ func NewBroker(brokerID BrokerID, inboxDepth int, bundles []*capstone.Bundle, st
 		money:      money,
 	}
 	for shardIndex, bundle := range bundles {
-		builtBroker.shards[shardIndex] = newShard(brokerID, inboxDepth, bundle)
+		builtShard := newShard(brokerID, inboxDepth, bundle)
+		// Copy the market-buy slippage dial from MoneyConfig into each
+		// shard. Each shard holds its own int64 copy — single-writer
+		// safe, no shared config pointer.
+		builtShard.slippageBufferBps = money.SlippageBufferBps
+		builtBroker.shards[shardIndex] = builtShard
 	}
 	slog.Info("funnel: NewBroker built",
 		"broker_id", brokerID,

@@ -2,6 +2,7 @@ package funnel
 
 import (
 	"log/slog"
+	"strconv"
 
 	"simulator/economy/account"
 	"simulator/economy/capstone"
@@ -9,8 +10,8 @@ import (
 	"simulator/economy/reserve"
 )
 
-// shard is one owner goroutine's home — the sole caller into L5 for
-// every account that hashes to it. Every field below is touched ONLY by
+// shard is one owner goroutine's home — the sole caller into the
+// reserve + realize engine for every account that hashes to it. Every field below is touched ONLY by
 // the shard's own goroutine (or by NewBroker at construction time,
 // before Start spawns that goroutine), so there is no mutex anywhere on
 // this type.
@@ -47,6 +48,26 @@ type shard struct {
 	sessions map[AccountID]*ownedSession
 	tracks   map[OrderID]*OrderTrack
 
+	// seq — Phase-5 Point-1 OrderID mint source (BROKER_PHASE5 §1.4 P5-D4).
+	// Shard-local monotonic uint64; the shard goroutine is the sole writer,
+	// so a plain `s.seq++` is correct — no atomic, no lock. Mint shape is
+	// "<AccountID>:<seq>" so settlement's accountOf parses the owner back.
+	// Crash-resume of this counter is B9, carried.
+	seq uint64
+
+	// mktCache — Phase-5 Point-1 market-buy price seam (P5-D3). Reads
+	// BestAsk at the start of a market-buy place to size the reservation.
+	// Hard-wired to nopMarketCache{} at newShard — real impl is B10 (Tier
+	// 5), not built. Tests swap the field directly for sealed scenarios.
+	mktCache MarketPriceCache
+
+	// slippageBufferBps — Phase-5 market-buy buffer dial (P5-D8), copied
+	// in from MoneyConfig.SlippageBufferBps at NewBroker time. Shard-local
+	// so slippageBuffer() reads a single field on the owner goroutine.
+	// Zero by default; a positive bps sizes an extra buffer on top of
+	// bestAsk*qty via `notional * bps / 10000`.
+	slippageBufferBps int64
+
 	bundle *capstone.Bundle
 	resv   *reserve.ReservationService
 	realiz *realize.Realizer
@@ -72,6 +93,7 @@ func newShard(brokerID BrokerID, inboxDepth int, bundle *capstone.Bundle) *shard
 		brokerID: brokerID,
 		sessions: make(map[AccountID]*ownedSession),
 		tracks:   make(map[OrderID]*OrderTrack),
+		mktCache: nopMarketCache{},
 		bundle:   bundle,
 	}
 	if bundle != nil {
@@ -85,6 +107,30 @@ func newShard(brokerID BrokerID, inboxDepth int, bundle *capstone.Bundle) *shard
 		)
 	}
 	return builtShard
+}
+
+// nextOrderID mints a fresh OrderID for a Phase-5 PlaceOrder (BROKER_PHASE5
+// §1.4 P5-D4). Shape is "<AccountID>:<seq>" where seq is this shard's local
+// monotonic uint64 — bumped on every call, so two orders on the same shard
+// (whether same or different accounts) never collide.
+//
+// Owner-goroutine only: `s.seq++` is a plain increment, no atomic, no lock
+// — the single-writer rule is the lock. A race-detector pass over the
+// Phase-5 settle/apply flows is the standing gate.
+//
+// Encoding rationale: the OrderID crosses the exchange seam and comes back
+// echoed on EngineResult.OrderID; the settlement consumer parses the
+// AccountID out via accountOf (LastIndex-based) so there is no cross-shard
+// OrderID→AccountID map. Keep the shape ":"-delimited.
+//
+// Resharding caveat / crash-resume (B9, carried): on recovery, the shard
+// must resume `seq` past the highest minted value for its accounts, or the
+// first mint after restart would collide with a surviving reservation.
+// Phase-5 implementation treats this as a flagged follow-up — the field is
+// in place, the snapshot shape is Phase-2 session_save's call.
+func (ownerShard *shard) nextOrderID(accountID AccountID) OrderID {
+	ownerShard.seq++
+	return accountID + ":" + strconv.FormatUint(ownerShard.seq, 10)
 }
 
 // Get satisfies BOTH reserve.AccountLedger and realize.AccountLedger

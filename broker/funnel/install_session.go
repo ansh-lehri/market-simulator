@@ -24,20 +24,27 @@ import (
 //                    OwnerType + OwnerID); teardown's SessionSave needs the
 //                    identity fields, so Phase 2 carries them verbatim
 //                    rather than passing a bare *account.Account.
-//   - Binding      — the per-session exchange wiring L7 injected; stored
-//                    on ownedSession for the mode-blind punch (Tier 1).
+//   - Binding      — the per-session exchange wiring, injected at
+//                    session-install; stored on ownedSession for the
+//                    mode-blind punch (Tier 1).
 //   - Participant  — the self-match id stamped on every outbound punch;
-//                    distinct from BrokerID.
+//     distinct from BrokerID.
+//   - Instruments  — the allowlist validateSpec reads at place time
+//     (BROKER_PHASE5 §1.4 P5-D9). Optional: nil ⇒ the handler
+//     defaults to permissiveInstruments{} so lifecycle plumbing
+//     works unchanged until session-install populates it with a
+//     sealed set. Carried, cross-point.
 //   - Reply        — buffered(1), caller-owned. handleInstallSession sends
-//                    exactly once: nil on install, ErrSessionAlreadyLive
-//                    on XOR refusal. The buffered send means the shard
-//                    never blocks even if the caller has walked away
-//                    (ctx timeout path in waitReply).
+//     exactly once: nil on install, ErrSessionAlreadyLive
+//     on XOR refusal. The buffered send means the shard
+//     never blocks even if the caller has walked away
+//     (ctx timeout path in waitReply).
 type InstallSession struct {
 	AccountID   AccountID
 	Loaded      lifecycle.LoadedAccount
 	Binding     SessionBinding
 	Participant ParticipantID
+	Instruments InstrumentSet
 	Reply       chan error
 }
 
@@ -53,8 +60,9 @@ func (cmd InstallSession) Account() AccountID { return cmd.AccountID }
 // XOR invariant: if an ownedSession already exists for the AccountID, the
 // install is refused with ErrSessionAlreadyLive. Install never
 // overwrites. The one-live-session rule (canonical XOR on-demand per user)
-// is enforced here as its last line of defense; L7's registry upholds it
-// upstream, but the funnel does not trust that at this seam.
+// is enforced here as its last line of defense; the orchestration
+// registry upholds it upstream, but the funnel does not trust that at
+// this seam.
 func (ownerShard *shard) handleInstallSession(cmd InstallSession) {
 	if _, live := ownerShard.sessions[cmd.AccountID]; live {
 		slog.Warn("funnel: handleInstallSession refusing — session already live",
@@ -64,10 +72,18 @@ func (ownerShard *shard) handleInstallSession(cmd InstallSession) {
 		cmd.Reply <- ErrSessionAlreadyLive
 		return
 	}
+	// Default an unset InstrumentSet to permissive — until session-install
+	// populates the command field, every live session should fail open
+	// rather than closed (BROKER_PHASE5 §1.4 P5-D9).
+	installedInstruments := cmd.Instruments
+	if installedInstruments == nil {
+		installedInstruments = permissiveInstruments{}
+	}
 	ownerShard.sessions[cmd.AccountID] = &ownedSession{
 		account:     cmd.Loaded,
 		binding:     cmd.Binding,
 		participant: cmd.Participant,
+		instruments: installedInstruments,
 	}
 	slog.Info("funnel: handleInstallSession installed",
 		"account_id", cmd.AccountID,

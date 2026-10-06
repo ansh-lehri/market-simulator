@@ -28,9 +28,9 @@ const (
 // OrderTrack is the broker's thin per-order record — EXCHANGE-SEAM
 // FACTS ONLY (BROKER_TIER0 §Point-5). All reservation money-state
 // (reserved cash / units, remaining qty, original qty, ever-filled,
-// brokerage-charged) lives in L5's ReservationRecord and is read from
-// L5; the funnel never mirrors it on OrderTrack. The rule prevents the
-// broker from duplicating money truth.
+// brokerage-charged) lives on the ReservationRecord in the reserve
+// package and is read from there; the funnel never mirrors it on
+// OrderTrack. The rule prevents the broker from duplicating money truth.
 //
 // The five Tier-0 fields:
 //   OrderID         the exchange's echoed key; the funnel mints it as
@@ -45,13 +45,33 @@ const (
 //   CancelInFlight  a cancel was punched, awaiting the exchange's ack;
 //                   set on cancel-punch, cleared on ack.
 //
-// A later tier (order intake) may extend OrderTrack with an IsMarketBuy
-// flag (for the market-buy buffer true-up at settlement). That field is
-// NOT Tier-0; do not add it here — extend when Tier-1 lands.
+// IsMarketBuy is the sixth field, added at Phase-5 (Tier 1) per
+// BROKER_PHASE5 §1 P5-D5. Set at place time when `Side == Buy && Type ==
+// Market`; gates the ReleaseExcess buffer true-up in settleMatch's full-fill
+// branch (only market buys have a slippage residue to return). All other
+// paths (sells, limits, cancels, rejects) ignore it.
 type OrderTrack struct {
 	OrderID        OrderID
 	AccountID      AccountID
 	Instrument     InstrumentID
 	Status         OrderStatus
 	CancelInFlight bool
+	IsMarketBuy    bool
+}
+
+// isTerminal reports whether an OrderStatus represents a final state —
+// Filled, Cancelled, or Rejected. finalizeTrack deletes the OrderTrack from
+// the shard's tracks map iff isTerminal(tr.Status) is true, so a
+// mid-lifecycle status (Working / PartiallyFilled) keeps its track for the
+// next event.
+//
+// OrderStatusUnknown is non-terminal: a track in that state is malformed
+// (the shard never writes it), but we return false defensively so the
+// cleanup pass does not silently drop a bug-shaped track.
+func isTerminal(status OrderStatus) bool {
+	switch status {
+	case OrderStatusFilled, OrderStatusCancelled, OrderStatusRejected:
+		return true
+	}
+	return false
 }
