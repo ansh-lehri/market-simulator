@@ -59,11 +59,9 @@ func (ownerShard *shard) dispatch(cmd Command) {
 // realization, or exchange work in this package — that logic lives in
 // the owning tier, not here.
 
-// handlePlaceOrder is the Tier-1 order-intake seam.
-func (ownerShard *shard) handlePlaceOrder(cmd PlaceOrder) PlaceResult {
-	_ = cmd
-	return PlaceResult{}
-}
+// handlePlaceOrder — Tier-1 order-intake body — lives in place.go
+// (BROKER_PHASE5 §1.3). Dispatch above calls the method; this file no
+// longer holds its stub.
 
 // handleCancel is the Tier-1 cancel seam.
 func (ownerShard *shard) handleCancel(cmd CancelOrder) CancelResult {
