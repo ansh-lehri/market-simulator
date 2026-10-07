@@ -241,20 +241,20 @@ func TestSettleGolden_Matched_PureRest(t *testing.T) {
 //   bestAsk = 10_000, qty = 60, bps = 0 → buffer = 0 → MaxSpend = 600_000
 //   Fills: Trade1 = 10_000 × 40, Trade2 = 10_000 × 15 → total 55 units, cost 550_000
 //   CancelledQty = 5, CancelReason = ReasonFundedCap
-// Expected reserve-call sequence: Convert×2 (fills) → Convert×1 (brokerage) → Release(5) →
-// ReleaseExcess (if IsMarketBuy && Filled; residue = 600_000 − 550_000 − 50_000_released = 0,
-// so residue is 0 — ReleaseExcess still fires but is a no-op on cash).
+// Expected reserve-call sequence: Convert×2 (fills) → Convert×1 (brokerage) → Release(5).
+// NO ReleaseExcess event: in case 4, `Release(CancelledQty)` is ALWAYS an exact-tail
+// release — fills + CancelledQty = origQty, so RemainingQty-at-release equals CancelledQty.
+// economy/reserve/release.go treats releaseQty == RemainingQty as a FULL release (not
+// proportional), draining ReservedCash to zero and REMOVING the record. The subsequent
+// ReleaseExcess call then finds no record and silently returns nil without emitting
+// a ReleaseEvent. The gate `IsMarketBuy && Status==Filled` still fires the call
+// (uniform with case 5 — clean full fill with residue), but it is a no-op in case 4.
 //
-// Hmm — the five-branch switch's case 4 (per Phase-5 §3.4) (`m.CancelledQty > 0`) does
-// Release(CancelledQty) and sets Status=Filled, THEN IsMarketBuy&&Filled
-// fires ReleaseExcess. For market-buy the ReleaseExcess returns the
-// unspent slippage buffer; the Release(CancelledQty) returned the
-// proportional slice for the cancelled portion.
+// The ONLY market-buy branch that produces a ReleaseExcess event is case 5 (clean full
+// fill), where Convert's shared tail may leave ReservedCash > 0 (price improvement +
+// slippage buffer) and ReleaseExcess drains it. Golden 1 pins that path.
 //
-// Rather than get tangled in the per-release math (ReservationService
-// per-qty cash share with half-up rounding), this golden pins ONLY the
-// event SEQUENCE and that Status=Filled + finalize. Rupee numbers come
-// from economy/reserve goldens one layer down.
+// Rupee numbers come from economy/reserve goldens one layer down.
 func TestSettleGolden_Matched_FillsPlusFundedCap_MarketBuy(t *testing.T) {
 	harness := newGoldenHarness(t)
 	harness.seedAccount(account.Cash{Available: 10_000_000}, nil)
@@ -286,9 +286,10 @@ func TestSettleGolden_Matched_FillsPlusFundedCap_MarketBuy(t *testing.T) {
 		t.Errorf("track NOT deleted after fills + funded-cap leftover, want finalize")
 	}
 	// reserve-event sequence: 2 fill ConvertEvents + 1 brokerage ConvertEvent +
-	// 1 Release (CancelledQty=5) + 1 ReleaseExcess (market-buy residue, may be 0).
-	if got := len(harness.events.emitted); got != 5 {
-		t.Fatalf("event count = %d, want 5 (fill1 + fill2 + brokerage + Release(5) + ReleaseExcess)", got)
+	// 1 Release (CancelledQty=5). ReleaseExcess fires in the handler but
+	// no-ops (record already removed by Release's exact-tail drain) — no event.
+	if got := len(harness.events.emitted); got != 4 {
+		t.Fatalf("event count = %d, want 4 (fill1 + fill2 + brokerage + Release(5))", got)
 	}
 	mustConvertEvent(t, harness.events.emitted[0])
 	mustConvertEvent(t, harness.events.emitted[1])
@@ -298,11 +299,8 @@ func TestSettleGolden_Matched_FillsPlusFundedCap_MarketBuy(t *testing.T) {
 	}
 	releaseLeftover := mustReleaseEvent(t, harness.events.emitted[3])
 	if releaseLeftover.Cash == 0 {
-		t.Errorf("Release(CancelledQty=5) emitted zero cash, want proportional slice")
+		t.Errorf("Release(CancelledQty=5) emitted zero cash, want full-drain of ReservedCash")
 	}
-	// ReleaseExcess may emit Cash=0 if the proportional release already
-	// drained the buffer; just assert the event FIRED (market-buy branch).
-	mustReleaseEvent(t, harness.events.emitted[4])
 }
 
 // -----------------------------------------------------------------------------
