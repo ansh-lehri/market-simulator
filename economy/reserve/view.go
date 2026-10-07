@@ -15,9 +15,11 @@ import "simulator/contract"
 //   - Phase-5 handleApplyResult (settleMakerFill): reads RemainingQty to
 //     decide Filled vs PartiallyFilled on an incremental maker fill.
 //   - Phase-6 open-orders read (A11, docs/broker/BROKER_READ_SURFACES
-//     _tier4.md §4.2): reads Side / IsMarket / OrigQty / RemainingQty /
-//     ReservedCash / ReservedUnits — derives FilledQty = OrigQty −
-//     RemainingQty at the call site (A11 §2.5 raw-buckets principle).
+//     _tier4.md §4.2): reads Side / IsMarket / LimitPrice / OrigQty /
+//     RemainingQty / ReservedCash / ReservedUnits — derives FilledQty =
+//     OrigQty − RemainingQty at the call site (A11 §2.5 raw-buckets
+//     principle). LimitPrice surfaces the resting-order price (0 for
+//     market orders) so the open-orders panel can show "resting at ₹X".
 //   - OrderID is included so a logging / debugging consumer can echo it
 //     back without re-threading it from the caller frame.
 //
@@ -35,6 +37,7 @@ type ReservationView struct {
 	OrderID       OrderID
 	Side          contract.Side
 	IsMarket      bool
+	LimitPrice    int64 // integer ticks; 0 for market orders
 	ReservedCash  int64
 	ReservedUnits int64
 	RemainingQty  int64
@@ -72,6 +75,7 @@ func (service *ReservationService) ViewReservation(orderID OrderID) (Reservation
 		OrderID:       record.OrderID,
 		Side:          record.Side,
 		IsMarket:      record.IsMarket,
+		LimitPrice:    record.LimitPrice,
 		ReservedCash:  record.ReservedCash,
 		ReservedUnits: record.ReservedUnits,
 		RemainingQty:  record.RemainingQty,
