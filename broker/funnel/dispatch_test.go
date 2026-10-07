@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"simulator/contract"
 	"simulator/economy/account"
 )
 
@@ -94,7 +95,19 @@ func TestShardDispatch_ReadPositionsSendsReply(t *testing.T) {
 // stress test) proves that dispatch actually reached the shard.
 func TestShardDispatch_ApplyResultRunsWithoutPanic(t *testing.T) {
 	dispatchedShard := newShard("B-dispatch", 4, nil)
-	dispatchedShard.dispatch(ApplyResult{AccountID: "acct-a"})
+	// OutcomeCancelRejected with an unknown OrderID is the one settlement
+	// branch that is a safe no-op without a live reservation + track + bundle
+	// — exactly what we have in this dispatch-only harness (nil bundle,
+	// empty maps). Any other Outcome would touch the reserve service
+	// (nil here) or an absent track (nil-deref); the dispatch wiring is
+	// still what we are verifying, not the handler semantics.
+	dispatchedShard.dispatch(ApplyResult{
+		AccountID: "acct-a",
+		Result: contract.EngineResult{
+			Outcome: contract.OutcomeCancelRejected,
+			OrderID: "acct-a:never-placed",
+		},
+	})
 }
 
 func TestShardDispatch_FireStopRunsWithoutPanic(t *testing.T) {
