@@ -127,6 +127,7 @@ func TestReserveBuyLimit_Sufficient(t *testing.T) {
 		InstrumentID: testInstrumentID,
 		Side:         contract.Buy,
 		IsMarket:     false,
+		LimitPrice:   50,
 		ReservedCash: 5_000,
 		RemainingQty: 100,
 		OrigQty:      100,
@@ -152,6 +153,97 @@ func TestReserveBuyLimit_Sufficient(t *testing.T) {
 	}
 	if harness.persist.dirtyCalls[0] != (dirtyCall{SessionID: testSessionID, AccountID: testAccountID}) {
 		t.Errorf("dirty call = %+v, want {sess-1 acct-1}", harness.persist.dirtyCalls[0])
+	}
+}
+
+// LimitPrice is stored on the admitted ReservationRecord verbatim from
+// Order.LimitPrice — across both Side values and both IsMarket values.
+// The field is a display fact: 0 for market orders (buy or sell), the
+// user's limit tick for limit orders (buy or sell). Phase-6 A11 reads
+// this field via ReservationView without back-calculating from
+// ReservedCash (unreliable on sells and market buys).
+func TestReserve_LimitPrice_StoredOnRecord(t *testing.T) {
+	tests := []struct {
+		name       string
+		side       contract.Side
+		isMarket   bool
+		limitPrice int64 // caller-supplied Order.LimitPrice
+		// For sell cases we need an existing position; buy cases skip it.
+		positions map[contract.InstrumentID]*account.Position
+		// Order sizing args (market buys use BestAsk/SlippageBuffer).
+		bestAsk        int64
+		slippageBuffer int64
+		wantLimitPrice int64 // what should land on the record
+	}{
+		{
+			name:           "buy-limit stores LimitPrice",
+			side:           contract.Buy,
+			isMarket:       false,
+			limitPrice:     50,
+			wantLimitPrice: 50,
+		},
+		{
+			name:           "buy-market stores LimitPrice=0 (caller sent 0)",
+			side:           contract.Buy,
+			isMarket:       true,
+			limitPrice:     0,
+			bestAsk:        52,
+			slippageBuffer: 200,
+			wantLimitPrice: 0,
+		},
+		{
+			name:       "sell-limit stores LimitPrice",
+			side:       contract.Sell,
+			isMarket:   false,
+			limitPrice: 75,
+			positions: map[contract.InstrumentID]*account.Position{
+				testInstrumentID: {Available: 200, OpenLots: []account.Lot{{EntryPrice: 50, RemainingQty: 200}}},
+			},
+			wantLimitPrice: 75,
+		},
+		{
+			name:       "sell-market stores LimitPrice=0 (caller sent 0)",
+			side:       contract.Sell,
+			isMarket:   true,
+			limitPrice: 0,
+			positions: map[contract.InstrumentID]*account.Position{
+				testInstrumentID: {Available: 200, OpenLots: []account.Lot{{EntryPrice: 50, RemainingQty: 200}}},
+			},
+			wantLimitPrice: 0,
+		},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			harness := newHarness()
+			acct := buildAccount(account.Cash{Available: 1_000_000}, testCase.positions)
+			harness.ledger.put(acct)
+
+			order := Order{
+				OrderID:        testOrderID,
+				AccountID:      testAccountID,
+				SessionID:      testSessionID,
+				InstrumentID:   testInstrumentID,
+				Side:           testCase.side,
+				Qty:            10,
+				IsMarket:       testCase.isMarket,
+				LimitPrice:     testCase.limitPrice,
+				BestAsk:        testCase.bestAsk,
+				SlippageBuffer: testCase.slippageBuffer,
+			}
+
+			if err := harness.service.ReserveIfAvailable(Participant{ID: testParticipant}, order); err != nil {
+				t.Fatalf("ReserveIfAvailable err = %v", err)
+			}
+
+			record := harness.service.book.get(testOrderID)
+			if record == nil {
+				t.Fatal("record missing after admission")
+			}
+			if record.LimitPrice != testCase.wantLimitPrice {
+				t.Errorf("record.LimitPrice = %d, want %d",
+					record.LimitPrice, testCase.wantLimitPrice)
+			}
+		})
 	}
 }
 
