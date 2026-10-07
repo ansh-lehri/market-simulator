@@ -62,6 +62,7 @@ func TestViewReservation_AfterReserveBuyLimit(t *testing.T) {
 	}
 	want := ReservationView{
 		OrderID: testOrderID, Side: contract.Buy, IsMarket: false,
+		LimitPrice:   50,
 		ReservedCash: 5_000, ReservedUnits: 0,
 		RemainingQty: 100, OrigQty: 100,
 	}
@@ -149,6 +150,7 @@ func TestViewReservation_AfterPartialConvert(t *testing.T) {
 	}
 	want := ReservationView{
 		OrderID: testOrderID, Side: contract.Buy, IsMarket: false,
+		LimitPrice:   50,
 		ReservedCash: 3_500, ReservedUnits: 0,
 		RemainingQty: 70, OrigQty: 100,
 	}
@@ -286,6 +288,7 @@ func TestViewReservation_AfterPartialRelease(t *testing.T) {
 	}
 	want := ReservationView{
 		OrderID: testOrderID, Side: contract.Buy, IsMarket: false,
+		LimitPrice:   50,
 		ReservedCash: 3_500, ReservedUnits: 0,
 		RemainingQty: 70, OrigQty: 100,
 	}
@@ -316,6 +319,7 @@ func TestViewReservation_ReturnsValueCopy_NoAliasing(t *testing.T) {
 	first.OrderID = "vandalised"
 	first.Side = contract.Sell
 	first.IsMarket = true
+	first.LimitPrice = -999
 	first.ReservedCash = -999
 	first.ReservedUnits = -999
 	first.RemainingQty = -999
@@ -327,6 +331,7 @@ func TestViewReservation_ReturnsValueCopy_NoAliasing(t *testing.T) {
 	}
 	want := ReservationView{
 		OrderID: testOrderID, Side: contract.Buy, IsMarket: false,
+		LimitPrice:   50,
 		ReservedCash: 5_000, ReservedUnits: 0,
 		RemainingQty: 100, OrigQty: 100,
 	}
@@ -371,6 +376,86 @@ func TestViewReservation_IsPureRead_NoSpyCalls(t *testing.T) {
 	if got := len(h.events.emitted); got != eventsBefore {
 		t.Errorf("ViewReservation produced events: before=%d after=%d",
 			eventsBefore, got)
+	}
+}
+
+// 6m — ViewReservation projects LimitPrice across both Side × IsMarket
+// combinations: limit orders carry the user's tick, market orders carry
+// 0. Phase-6 A11 reads this field directly from the view instead of
+// back-calculating from ReservedCash (unreliable on sells + market buys).
+func TestViewReservation_LimitPrice_ProjectedForAllTypes(t *testing.T) {
+	tests := []struct {
+		name           string
+		side           contract.Side
+		isMarket       bool
+		limitPrice     int64
+		positions      map[contract.InstrumentID]*account.Position
+		bestAsk        int64
+		slippageBuffer int64
+		wantLimitPrice int64
+	}{
+		{
+			name:           "buy-limit view carries LimitPrice",
+			side:           contract.Buy,
+			isMarket:       false,
+			limitPrice:     50,
+			wantLimitPrice: 50,
+		},
+		{
+			name:           "buy-market view carries LimitPrice=0",
+			side:           contract.Buy,
+			isMarket:       true,
+			bestAsk:        52,
+			slippageBuffer: 200,
+			wantLimitPrice: 0,
+		},
+		{
+			name:       "sell-limit view carries LimitPrice",
+			side:       contract.Sell,
+			isMarket:   false,
+			limitPrice: 75,
+			positions: map[contract.InstrumentID]*account.Position{
+				testInstrumentID: {Available: 200, OpenLots: []account.Lot{{EntryPrice: 50, RemainingQty: 200}}},
+			},
+			wantLimitPrice: 75,
+		},
+		{
+			name:     "sell-market view carries LimitPrice=0",
+			side:     contract.Sell,
+			isMarket: true,
+			positions: map[contract.InstrumentID]*account.Position{
+				testInstrumentID: {Available: 200, OpenLots: []account.Lot{{EntryPrice: 50, RemainingQty: 200}}},
+			},
+			wantLimitPrice: 0,
+		},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			h := newHarness()
+			buildAccountInLedger(h, account.Cash{Available: 1_000_000}, testCase.positions)
+
+			mustReserve(t, h, Order{
+				OrderID:        testOrderID,
+				AccountID:      testAccountID,
+				SessionID:      testSessionID,
+				InstrumentID:   testInstrumentID,
+				Side:           testCase.side,
+				Qty:            10,
+				IsMarket:       testCase.isMarket,
+				LimitPrice:     testCase.limitPrice,
+				BestAsk:        testCase.bestAsk,
+				SlippageBuffer: testCase.slippageBuffer,
+			})
+
+			view, ok := h.service.ViewReservation(testOrderID)
+			if !ok {
+				t.Fatal("ViewReservation ok=false after admission")
+			}
+			if view.LimitPrice != testCase.wantLimitPrice {
+				t.Errorf("view.LimitPrice = %d, want %d",
+					view.LimitPrice, testCase.wantLimitPrice)
+			}
+		})
 	}
 }
 
