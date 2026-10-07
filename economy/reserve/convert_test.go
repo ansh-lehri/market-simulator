@@ -125,6 +125,7 @@ func TestConvertBuy_Partial_CostOrdering(t *testing.T) {
 		InstrumentID:     testInstrumentID,
 		Side:             contract.Buy,
 		IsMarket:         false,
+		LimitPrice:       10_000,
 		ReservedCash:     600_000,
 		RemainingQty:     60,
 		OrigQty:          100,
