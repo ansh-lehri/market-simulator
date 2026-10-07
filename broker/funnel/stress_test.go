@@ -91,7 +91,16 @@ func TestStress_MixedCommandsAcrossShards(t *testing.T) {
 					}
 				case 5:
 					atomic.AddUint64(&submittedPushes, 1)
-					brokerUnderTest.PushApplyResult(accountID, contract.EngineResult{OrderID: OrderID(fmt.Sprintf("%s:1", accountID))})
+					// OutcomeCancelRejected is the one settlement branch
+					// that is a safe no-op when the shard has no
+					// reservation + no track + a nil bundle (the stress
+					// harness state). Any other Outcome exercises
+					// reserve-service or MatchResult paths that would
+					// nil-deref under this scaffold.
+					brokerUnderTest.PushApplyResult(accountID, contract.EngineResult{
+						Outcome: contract.OutcomeCancelRejected,
+						OrderID: OrderID(fmt.Sprintf("%s:1", accountID)),
+					})
 				case 6:
 					atomic.AddUint64(&submittedPushes, 1)
 					brokerUnderTest.PushFireStop(accountID, StopRecord{})
