@@ -154,11 +154,9 @@ func (ownerShard *shard) handleReadPositions(cmd ReadPositions) PositionsSnapsho
 	return PositionsSnapshot{}
 }
 
-// handleApplyResult is the Tier-1 settlement seam — applies a
-// contract.EngineResult against the account. Push command; no reply.
-func (ownerShard *shard) handleApplyResult(cmd ApplyResult) {
-	_ = cmd
-}
+// handleApplyResult — Tier-1 settlement body — lives in settle.go
+// (BROKER_PHASE5 §3). Dispatch above calls the method; this file no
+// longer holds its stub.
 
 // handleFireStop is the Tier-2 stop-fire seam. Push command; no reply.
 func (ownerShard *shard) handleFireStop(cmd FireStop) {
