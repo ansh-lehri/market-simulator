@@ -26,6 +26,18 @@ type ReservationRecord struct {
 	Side     contract.Side
 	IsMarket bool // affects ReleaseExcess (market-buy buffer true-up)
 
+	// LimitPrice — the user's set price (integer ticks) at admission. 0 for
+	// market orders. Stored (never back-calculated) because the derived
+	// `ReservedCash = LimitPrice*Qty` is lossy: partial fills decrement
+	// ReservedCash at the execution price (convert.go), sells reserve units
+	// (ReservedCash == 0), and market buys fold in a slippage buffer — so
+	// `LimitPrice = ReservedCash / RemainingQty` is unreliable across the
+	// record's lifetime. Read-only display fact; no hand mutates it after
+	// admission. Keeps the pure/replayable rule intact (no clock/IO).
+	// Consumed by the broker's Phase-6 open-orders read (A11) via
+	// ReservationView.
+	LimitPrice int64
+
 	// ReservedCash — cash still locked for the unfilled qty (buy side).
 	// 0 for sell records. Coins, always >= 0 while the record lives.
 	ReservedCash int64
