@@ -67,7 +67,7 @@ func (ownerShard *shard) handlePlaceOrder(cmd PlaceOrder) PlaceResult {
 	var buffer int64
 	isMarketBuy := order.Side == contract.Buy && order.Type == contract.Market
 	if isMarketBuy {
-		cachedBestAsk, hit := ownerShard.mktCache.BestAsk(order.Instrument)
+		cachedBestAsk, hit := ownerShard.mktCache.BestAsk(liveSession.binding.ExchangeID, order.Instrument)
 		if !hit {
 			slog.Warn("funnel: handlePlaceOrder rejected — no market price",
 				"account_id", cmd.AccountID,
