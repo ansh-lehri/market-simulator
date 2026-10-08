@@ -93,45 +93,104 @@ func (stub *stubBroker) block(ctx context.Context) error {
 	}
 }
 
-// stubStore implements storePort. Only RecentTrades is actually
-// exercised today (the observation endpoint is the only live-handler
-// user of the store); the other four methods satisfy the interface
-// with zero-value returns and are not called by any live handler yet.
-// A durable-handler test that lands later will configure its own
-// fields on this struct.
+// stubStore implements storePort. Fields are set per-test; a method
+// with no configured reply returns the zero value, which the handlers
+// treat as a legitimate empty-but-successful read (200 with [] / zero
+// counts) — exactly the behaviour real Store methods have for new or
+// trade-less accounts.
 type stubStore struct {
+	// RecentTrades leg (used by the observation endpoint).
 	recentReply []store.TradeRow
 	recentErr   error
-	delay       time.Duration
 
-	recentCalls atomic.Int64
+	// TradePage + PnLSummary legs (trades + pnl endpoints).
+	tradePageReply   []store.TradeRow
+	tradePageErr     error
+	pnlReply         store.PnLSummary
+	pnlErr           error
+
+	// Costs legs (per-trade + aggregate).
+	costsPerTradeReply  []store.TradeCostBreakdown
+	costsPerTradeErr    error
+	costsAggregateReply store.CostAggregate
+	costsAggregateErr   error
+
+	// Captured args so tests can assert the handler threaded them
+	// through correctly (pagination cursor, country routing, etc.).
+	tradePageLimit        int
+	tradePageBefore       *time.Time
+	costsPerTradeLimit    int
+	costsPerTradeBefore   *time.Time
+
+	// Applied uniformly by every method; a test that wants only one
+	// leg slow should instead set its own stub via a wrapper.
+	delay time.Duration
+
+	// Call witnesses for fan-out proofs.
+	recentCalls         atomic.Int64
+	tradePageCalls      atomic.Int64
+	pnlCalls            atomic.Int64
+	costsPerTradeCalls  atomic.Int64
+	costsAggregateCalls atomic.Int64
 }
 
 func (stub *stubStore) RecentTrades(ctx context.Context, _ store.AccountID, _ int) ([]store.TradeRow, error) {
 	stub.recentCalls.Add(1)
-	if stub.delay > 0 {
-		select {
-		case <-time.After(stub.delay):
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
+	if waitErr := stub.waitOrCancel(ctx); waitErr != nil {
+		return nil, waitErr
 	}
 	return stub.recentReply, stub.recentErr
 }
 
-// Zero-value stubs for the four storePort methods that no handler
-// calls today. They exist only so *stubStore satisfies the interface.
-func (stub *stubStore) TradePage(context.Context, store.AccountID, int, *time.Time) ([]store.TradeRow, error) {
-	return nil, nil
+func (stub *stubStore) TradePage(ctx context.Context, _ store.AccountID, limit int, before *time.Time) ([]store.TradeRow, error) {
+	stub.tradePageCalls.Add(1)
+	stub.tradePageLimit = limit
+	stub.tradePageBefore = before
+	if waitErr := stub.waitOrCancel(ctx); waitErr != nil {
+		return nil, waitErr
+	}
+	return stub.tradePageReply, stub.tradePageErr
 }
-func (stub *stubStore) PnLSummary(context.Context, store.AccountID) (store.PnLSummary, error) {
-	return store.PnLSummary{}, nil
+
+func (stub *stubStore) PnLSummary(ctx context.Context, _ store.AccountID) (store.PnLSummary, error) {
+	stub.pnlCalls.Add(1)
+	if waitErr := stub.waitOrCancel(ctx); waitErr != nil {
+		return store.PnLSummary{}, waitErr
+	}
+	return stub.pnlReply, stub.pnlErr
 }
-func (stub *stubStore) CostsPerTradeIN(context.Context, store.AccountID, int, *time.Time) ([]store.TradeCostBreakdown, error) {
-	return nil, nil
+
+func (stub *stubStore) CostsPerTradeIN(ctx context.Context, _ store.AccountID, limit int, before *time.Time) ([]store.TradeCostBreakdown, error) {
+	stub.costsPerTradeCalls.Add(1)
+	stub.costsPerTradeLimit = limit
+	stub.costsPerTradeBefore = before
+	if waitErr := stub.waitOrCancel(ctx); waitErr != nil {
+		return nil, waitErr
+	}
+	return stub.costsPerTradeReply, stub.costsPerTradeErr
 }
-func (stub *stubStore) CostsAggregateIN(context.Context, store.AccountID) (store.CostAggregate, error) {
-	return store.CostAggregate{}, nil
+
+func (stub *stubStore) CostsAggregateIN(ctx context.Context, _ store.AccountID) (store.CostAggregate, error) {
+	stub.costsAggregateCalls.Add(1)
+	if waitErr := stub.waitOrCancel(ctx); waitErr != nil {
+		return store.CostAggregate{}, waitErr
+	}
+	return stub.costsAggregateReply, stub.costsAggregateErr
+}
+
+// waitOrCancel sleeps for delay, cancelled early by ctx. Returns the
+// ctx error on cancel so a slow stub reproduces a real Store that
+// errors out on ctx deadline (which the handler maps to 503).
+func (stub *stubStore) waitOrCancel(ctx context.Context) error {
+	if stub.delay <= 0 {
+		return nil
+	}
+	select {
+	case <-time.After(stub.delay):
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // Compile-time guarantees that the stubs still satisfy the ports — if
