@@ -87,6 +87,12 @@ func TestCostsPerTradeIN_HappyPath_AllLinesSurface(t *testing.T) {
 	if _, present := findLine(row.Lines, "brokerage"); present {
 		t.Error("brokerage line unexpectedly present (D2 — not an India Line* name)")
 	}
+	// ExitAt must come back as the parent trade's exit_at from the
+	// participant_trades join — Phase-6 cost pagination relies on this
+	// to form the next-page cursor.
+	if row.ExitAt.IsZero() {
+		t.Error("ExitAt is zero; expected the seeded parent trade's exit_at via the join")
+	}
 }
 
 // Zero-value drops: a trade without an auto-square fee — the line is
