@@ -246,15 +246,49 @@ func (broker *Broker) ReadBalance(ctx context.Context, accountID AccountID) (Bal
 }
 
 // ReadPositions requests a live positions snapshot for the given account.
-// Same copy-out rule as ReadBalance.
-func (broker *Broker) ReadPositions(ctx context.Context, accountID AccountID) (PositionsSnapshot, error) {
+// Same copy-out rule as ReadBalance. instrument is an optional single-
+// instrument filter: "" means "all held instruments" (A9 default); a
+// specific InstrumentID returns at most one row (empty slice if the
+// account holds nothing in it). A14's composite also calls through this
+// facade's underlying command with instrument="", via ReadObservation.
+func (broker *Broker) ReadPositions(ctx context.Context, accountID AccountID, instrument InstrumentID) (PositionsSnapshot, error) {
 	replyChannel := make(chan PositionsSnapshot, 1)
-	broker.route(ReadPositions{AccountID: accountID, ReplyTo: replyChannel})
+	broker.route(ReadPositions{AccountID: accountID, Instrument: instrument, ReplyTo: replyChannel})
 	select {
 	case reply := <-replyChannel:
 		return reply, nil
 	case <-ctx.Done():
 		return PositionsSnapshot{}, ErrBrokerTimeout
+	}
+}
+
+// ReadOpenOrders requests a live open-orders snapshot for the given
+// account (A11). Same copy-out rule — the returned slice holds
+// OpenOrderView values with no pointer into shard.tracks or into the
+// reserve book.
+func (broker *Broker) ReadOpenOrders(ctx context.Context, accountID AccountID) (OpenOrdersSnapshot, error) {
+	replyChannel := make(chan OpenOrdersSnapshot, 1)
+	broker.route(ReadOpenOrders{AccountID: accountID, ReplyTo: replyChannel})
+	select {
+	case reply := <-replyChannel:
+		return reply, nil
+	case <-ctx.Done():
+		return OpenOrdersSnapshot{}, ErrBrokerTimeout
+	}
+}
+
+// ReadObservation requests a composite live snapshot (balance +
+// positions + open orders) for the given account in one shard visit
+// (A14). The durable "recent closed trades" half is fanned out by the
+// HTTP handler and merged — not threaded through here.
+func (broker *Broker) ReadObservation(ctx context.Context, accountID AccountID) (ObservationLive, error) {
+	replyChannel := make(chan ObservationLive, 1)
+	broker.route(ReadObservation{AccountID: accountID, ReplyTo: replyChannel})
+	select {
+	case reply := <-replyChannel:
+		return reply, nil
+	case <-ctx.Done():
+		return ObservationLive{}, ErrBrokerTimeout
 	}
 }
 
