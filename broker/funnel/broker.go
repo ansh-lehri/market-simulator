@@ -51,19 +51,24 @@ type Broker struct {
 // single-threaded and safe without a lock.
 //
 // Signature per BROKER_PHASE1 §1.4, extended at Phase 2 with the money
-// dial struct (BROKER_PHASE2 §1 / §2). A nil-slot in bundles yields a
+// dial struct (BROKER_PHASE2 §1 / §2), and at Phase 6 with mktCache
+// (the shared BestAsk + LastPrice seam, BROKER_PHASE6 §1.3 X4,
+// (ExchangeID, InstrumentID)-keyed). A nil-slot in bundles yields a
 // shard with nil resv / realiz — legal for funnel-internal tests that
 // never invoke a handler body that would call reserve / realize.
 //
-// A nil store is legal in Phase 0 / funnel-internal tests; BringUp always
-// supplies a real *Store. A zero-valued MoneyConfig is legal in tests
-// that do not exercise EnsureAccount / QualifyOnDemand.
+// A nil store is legal in Phase 0 / funnel-internal tests; BringUp
+// always supplies a real *Store. A zero-valued MoneyConfig is legal in
+// tests that do not exercise EnsureAccount / QualifyOnDemand. A nil
+// mktCache is legal — newShard substitutes nopMarketCache{} so the
+// place handler stays safe; bringup passes nil until Phase 7 wires the
+// real cache (B10 ingestor-fed, one writer per ExchangeID).
 //
 // Panics if bundles is empty — a zero-shard broker cannot route (hash
 // modulo zero is undefined). This is a construction-time invariant, not
 // a runtime condition; a caller passing an empty slice is a programming
 // error.
-func NewBroker(brokerID BrokerID, inboxDepth int, bundles []*capstone.Bundle, store *Store, money MoneyConfig) *Broker {
+func NewBroker(brokerID BrokerID, inboxDepth int, bundles []*capstone.Bundle, store *Store, money MoneyConfig, mktCache MarketPriceCache) *Broker {
 	if len(bundles) == 0 {
 		panic("funnel: NewBroker requires at least one bundle (shardCount = len(bundles) must be > 0)")
 	}
@@ -75,7 +80,7 @@ func NewBroker(brokerID BrokerID, inboxDepth int, bundles []*capstone.Bundle, st
 		money:      money,
 	}
 	for shardIndex, bundle := range bundles {
-		builtShard := newShard(brokerID, inboxDepth, bundle)
+		builtShard := newShard(brokerID, inboxDepth, bundle, mktCache)
 		// Copy the market-buy slippage dial from MoneyConfig into each
 		// shard. Each shard holds its own int64 copy — single-writer
 		// safe, no shared config pointer.
@@ -87,6 +92,7 @@ func NewBroker(brokerID BrokerID, inboxDepth int, bundles []*capstone.Bundle, st
 		"shard_count", builtBroker.shardCount,
 		"inbox_depth", inboxDepth,
 		"store_present", store != nil,
+		"mkt_cache_present", mktCache != nil,
 		"starting_capital", money.StartingCapital,
 		"starting_bank", money.StartingBank,
 		"on_demand_minimum", money.OnDemandMinimum,
