@@ -5,27 +5,21 @@ import (
 	"simulator/economy/realize"
 )
 
-// Phase-6 shared read helpers (BROKER_PHASE6 §1.4 / BROKER_READ_SURFACES
-// _tier4 §1).
+// Shared read helpers for the live-read handlers. Each runs on the
+// owning shard goroutine (invoked from the shard's handleReadX wrapper
+// — the one in shard_handlers.go that does the liveness check). The
+// shard is the single writer for its accounts' state (sessions,
+// tracks, resv, mktCache), so these helpers need no lock and return
+// by-value snapshots the caller forwards on the reply channel.
+// Nothing outside the shard ever holds a pointer into Cash, Positions,
+// OrderTrack, or a reservation record.
 //
-// Each helper runs on the OWNING SHARD GOROUTINE — invoked from the shard's
-// read handler (handleReadBalance / handleReadPositions / handleReadOpenOrders
-// / handleReadObservation; those live in shard_handlers.go, filled by
-// Stage 4). The shard is the single writer for its accounts' state
-// (sessions, tracks, resv, mktCache), so these reads need no lock and
-// return by-value snapshots the caller forwards on the reply channel.
-// Nothing outside the shard ever holds a pointer into Account.Cash,
-// Account.Positions, OrderTrack, or ReservationRecord — the project's
-// message-boundary discipline.
-//
-// Pure read code: no log/slog, no store writes, no mutation. (The handler
-// wrappers in Stage 4 do boundary logging; these are the pure "copy out
-// state into view structs" step.)
+// Pure read code: no logging, no store writes, no mutation. The
+// boundary logs live on the handler wrappers one layer up.
 
-// readBalance returns the four-bucket Cash copy for an already-resolved
-// live session. The caller (handleReadBalance) has established Present:true
-// before invoking this helper; the Present field is stamped by the caller
-// alongside the fields set here.
+// readBalance copies the four Cash buckets off an already-resolved
+// live session. The caller has already established Present:true; this
+// helper stamps it on the snapshot alongside the fields set here.
 func readBalance(session *ownedSession) BalanceSnapshot {
 	cash := session.account.Account.Cash
 	return BalanceSnapshot{
@@ -37,22 +31,20 @@ func readBalance(session *ownedSession) BalanceSnapshot {
 	}
 }
 
-// readPositions walks the live Account's Positions map and projects each
-// non-flat holding into a PositionView. instrument == "" means "all held
-// instruments"; otherwise exactly the one filter instrument (empty slice
-// if the account holds nothing in it). A flat position (Available==0 and
-// Reserved==0) is skipped — the view represents live holdings, and a
-// zero-row would be noise.
+// readPositions walks the live Account's positions and projects each
+// non-flat holding into a PositionView. instrument == "" means every
+// held instrument; a specific instrument the account doesn't hold
+// returns an empty slice (the handler surfaces that as a live 200,
+// not a 404).
 //
-// WeightedAvgEntry is qty-weighted over OpenLots (realize.ComputeWeightedAvgEntry),
-// zero when flat (the flat-skip above means this returns a value only on
-// non-flat rows anyway). MarkAvailable degrades to false when the shard's
-// MarketPriceCache misses on LastPrice for (sess.binding.ExchangeID,
-// instrument) — the production stand-in nopMarketCache always misses
-// until Phase 7 wires a real tape relay (BROKER_PHASE6 X4/X7); on a hit,
-// GrossUnrealized is ComputeUnrealizedMark with incurredEntryCosts=0 so
-// the "gross" leg is returned (the "net" leg is the Phase-6 deferred gap,
-// §3.8 — nothing accumulates per-position entry costs today).
+// Flat positions (Available and Reserved both zero) are skipped so a
+// stale map entry doesn't appear as an empty row in the response.
+// WeightedAvgEntry comes from a qty-weighted sum over the open lots.
+// The mark fields degrade honestly: when the market-price cache
+// misses on LastPrice (the production stand-in misses on everything
+// until the tape relay goes live), MarkAvailable stays false and LTP
+// / GrossUnrealized stay zero — the position, reserved qty, and
+// weighted-avg entry still ship.
 func readPositions(ownerShard *shard, session *ownedSession, instrument InstrumentID) []PositionView {
 	acct := session.account.Account
 	views := make([]PositionView, 0, len(acct.Positions))
@@ -85,24 +77,26 @@ func readPositions(ownerShard *shard, session *ownedSession, instrument Instrume
 	return views
 }
 
-// readOpenOrders projects the shard's open-order tracks for one account
-// into OpenOrderView rows. Join of two sources on the shard:
+// readOpenOrders projects the shard's open-order tracks for one
+// account into OpenOrderView rows. Join of two sources on the shard:
 //
-//   - shard.tracks            → OrderID, Instrument, Status, CancelInFlight.
-//   - resv.ViewReservation    → Side, IsMarket, LimitPrice, OrigQty,
-//                               RemainingQty, ReservedCash, ReservedUnits.
+//   - the tracks map              → OrderID, Instrument, Status,
+//                                   CancelInFlight;
+//   - the reservation book's view → Side, IsMarket, LimitPrice,
+//                                   OrigQty, RemainingQty,
+//                                   ReservedCash, ReservedUnits.
 //
-// tracks is the index — terminal orders are deleted at settlement, so
-// everything that survives in tracks is open-set by construction. We
-// still filter by AccountID because one shard carries many accounts and
-// tracks is keyed by OrderID (per-account filter is O(open orders on
-// this shard) — fine for the demo per BROKER_PHASE6 §4.7).
+// Tracks is the index — terminal orders are deleted at settlement, so
+// anything still in tracks is open-set by construction. We filter by
+// AccountID because one shard carries many accounts and the tracks
+// map is keyed by OrderID (per-account scan is O(open orders on this
+// shard) — fine at the scale of a demo).
 //
-// A track whose ReservationView has been removed is unusual (the shard's
-// finalize should drop track + reservation together), but we tolerate it:
-// the view ships with the track-side fields set and the money/qty/side/
-// price fields at their zero values. The slice always slots in a view
-// per matching track — the join never silently drops rows.
+// A track whose reservation view has been removed is unusual (the
+// shard's finalize should drop both together), but we tolerate it:
+// the view ships with the track-side fields set and the money / qty
+// / side / price fields at their zero values. The slice always slots
+// in a view per matching track — the join never silently drops rows.
 func readOpenOrders(ownerShard *shard, accountID AccountID) []OpenOrderView {
 	orders := make([]OpenOrderView, 0)
 	for orderID, track := range ownerShard.tracks {

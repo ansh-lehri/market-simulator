@@ -5,23 +5,21 @@ import (
 	"simulator/economy/account"
 )
 
-// The Tier-0 command types, split by whether the caller waits for a
-// reply (BROKER_TIER0 §3). Phase-6 adds ReadOpenOrders / ReadObservation
-// (both request/response, Tier 4).
+// The command types the funnel accepts, split by whether the caller
+// waits for a reply.
 //
 //   Request/response (carry a buffered(1) ReplyTo, caller blocks):
-//     PlaceOrder       → Tier 1
-//     CancelOrder      → Tier 1
-//     Transfer         → Tier 3 (Phase-3 finalizes the Tier-0 BankMove
-//                        placeholder; BROKER_PHASE3 §1.2 P3-D1)
-//     ReadBalance      → Tier 4 (A8)
-//     ReadPositions    → Tier 4 (A9) — carries optional Instrument filter
-//     ReadOpenOrders   → Tier 4 (A11)
-//     ReadObservation  → Tier 4 (A14) — composite live snapshot
+//     PlaceOrder       — place a new order
+//     CancelOrder      — cancel a working order
+//     Transfer         — move money between the trading and bank buckets
+//     ReadBalance      — read the account's four Cash buckets
+//     ReadPositions    — read positions, optionally filtered by instrument
+//     ReadOpenOrders   — read the account's working-order set
+//     ReadObservation  — composite live snapshot (balance + positions + orders)
 //
 //   Push (no reply, nobody waits):
-//     ApplyResult      → Tier 1 (settle an exchange EngineResult)
-//     FireStop         → Tier 2 (a stop triggered)
+//     ApplyResult      — settle an exchange EngineResult
+//     FireStop         — a stop triggered on a watched order
 //
 // Each command's Account() method returns the AccountID the router
 // hashes; the router reads ONLY this method (BROKER_TIER0 §3, Point 3).
@@ -86,12 +84,12 @@ type ReadBalance struct {
 // Account returns the routing key for the funnel router.
 func (cmd ReadBalance) Account() AccountID { return cmd.AccountID }
 
-// ReadPositions — Tier 4 live-positions read. Copy-out contract; same
+// ReadPositions is the live-positions read. Copy-out contract; same
 // rule as ReadBalance. Instrument is an optional single-instrument
-// filter: "" means "all held instruments" (A9 default); a specific
-// InstrumentID returns at most one row (empty slice if the account
-// holds nothing in it). The HTTP layer parses &instrument= and threads
-// it in; A14's composite calls with "" (all).
+// filter: "" means every held instrument; a specific InstrumentID
+// returns at most one row (empty slice if the account holds nothing
+// in it). The HTTP layer parses ?instrument= and threads it in; the
+// observation handler calls with "" to get them all.
 type ReadPositions struct {
 	AccountID  AccountID
 	Instrument InstrumentID
@@ -101,9 +99,9 @@ type ReadPositions struct {
 // Account returns the routing key for the funnel router.
 func (cmd ReadPositions) Account() AccountID { return cmd.AccountID }
 
-// ReadOpenOrders — Tier 4 live-open-orders read (A11). Copy-out: the
-// handler joins shard.tracks (status / cancel-in-flight) with
-// reserve.ReservationView (money/qty/side/price) and returns a value-
+// ReadOpenOrders is the live-open-orders read. Copy-out: the handler
+// joins the shard's tracks map (status, cancel-in-flight) with the
+// reservation view (money / qty / side / price) and returns a value-
 // copy slice. No instrument filter — the account's whole working set.
 type ReadOpenOrders struct {
 	AccountID AccountID
@@ -113,12 +111,13 @@ type ReadOpenOrders struct {
 // Account returns the routing key for the funnel router.
 func (cmd ReadOpenOrders) Account() AccountID { return cmd.AccountID }
 
-// ReadObservation — Tier 4 composite live snapshot (A14). Reads balance
-// + positions + open orders in ONE shard visit so the three cannot
-// interleave with a fill — three independent facade calls could, which
-// is the whole point of a dedicated command. The durable "recent
-// closed trades" half of the agent observation is fanned out
-// concurrently by the HTTP handler and merged, not here.
+// ReadObservation is the composite live snapshot — balance, positions
+// and open orders assembled in one visit to the owning shard so the
+// three sub-payloads cannot interleave with a fill. Three independent
+// facade calls could interleave, which is the whole reason this is a
+// dedicated command. The durable "recent closed trades" half of the
+// observation body is fanned out concurrently by the HTTP handler and
+// merged there, not here.
 type ReadObservation struct {
 	AccountID AccountID
 	ReplyTo   chan ObservationLive // buffered(1); caller-owned

@@ -8,91 +8,86 @@ import (
 	"simulator/broker/store"
 )
 
-// brokerPort is the minimal shape the live-read HTTP handlers need from
-// the funnel broker (BROKER_PHASE6 §1.1 ports.go sketch). Four methods —
-// each a one-to-one mirror of a Phase-6 funnel facade: A8 ReadBalance, A9
-// ReadPositions (with the optional single-instrument filter), A11
-// ReadOpenOrders, A14 ReadObservation.
+// brokerPort is the minimal shape the live-read handlers need from the
+// funnel broker — one method per endpoint, each a one-to-one mirror of
+// a facade on *funnel.Broker.
 //
-// Why one joined interface for all four endpoints: A14's handler also
-// fans out to RecentTrades, so it needs both brokerPort and storePort;
-// the single-read handlers each need exactly one method. One joined
-// interface stays dependency-honest via Go's "unused method on a stub
-// is fine" idiom — same precedent as broker/order's brokerPort.
+// One joined interface rather than four small ones: the observation
+// handler calls ReadObservation and also talks to the store, so it
+// already needs both ports; splitting brokerPort would force it to
+// depend on two broker-side interfaces that must happen to be
+// satisfied by the same object (an awkwardness Go doesn't express
+// well). A handler that only uses one of the four methods stays
+// dependency-honest via the "unused method on a stub is fine" idiom.
 //
 // *funnel.Broker satisfies this interface implicitly; nothing on the
 // funnel changes.
 //
-// Scope note: the interface lives on the consumer side (broker/reads/),
-// not inside broker/funnel/. Go idiom + same rationale as broker/transfer
-// and broker/order: interfaces belong on the caller; the producer stays
-// unaware of the HTTP shape.
+// The interface lives on the consumer side (this package), not inside
+// broker/funnel/. Go idiom: interfaces belong on the caller, so the
+// producer stays unaware of the HTTP shape — same pattern as the
+// transfer and order packages.
 type brokerPort interface {
-	// ReadBalance forwards to the owning shard's handleReadBalance,
-	// blocking on the reply or ctx deadline. Returns funnel.ErrBrokerTimeout
-	// on ctx.Done.
+	// ReadBalance forwards to the owning shard's balance handler and
+	// blocks on the reply or the ctx deadline, returning
+	// funnel.ErrBrokerTimeout on ctx.Done.
 	ReadBalance(
 		ctx context.Context,
 		accountID funnel.AccountID,
 	) (funnel.BalanceSnapshot, error)
 
-	// ReadPositions forwards to handleReadPositions with the optional
-	// single-instrument filter (""==all held).
+	// ReadPositions forwards to the positions handler with an optional
+	// single-instrument filter — "" means every held instrument.
 	ReadPositions(
 		ctx context.Context,
 		accountID funnel.AccountID,
 		instrument funnel.InstrumentID,
 	) (funnel.PositionsSnapshot, error)
 
-	// ReadOpenOrders forwards to handleReadOpenOrders. Live-only; A10
-	// serves history (durable).
+	// ReadOpenOrders forwards to the open-orders handler. Live-only —
+	// trade history lives behind the durable trades endpoint.
 	ReadOpenOrders(
 		ctx context.Context,
 		accountID funnel.AccountID,
 	) (funnel.OpenOrdersSnapshot, error)
 
-	// ReadObservation forwards to handleReadObservation — one atomic
-	// shard visit assembling balance + positions + open orders. The
-	// durable recent-trades half of A14 is handled by the HTTP handler,
-	// not here.
+	// ReadObservation runs balance, positions and open-orders in one
+	// visit to the owning shard so the three sub-payloads cannot
+	// interleave with a fill. The durable "recent closed trades" half
+	// of the observation body is merged in by the HTTP handler, not
+	// here.
 	ReadObservation(
 		ctx context.Context,
 		accountID funnel.AccountID,
 	) (funnel.ObservationLive, error)
 }
 
-// storePort is the minimal shape the durable-read HTTP handlers need
-// from the broker Store (BROKER_PHASE6 §1.1). Five methods, each a
-// one-to-one mirror of a built store method:
+// storePort is the minimal shape the durable-read handlers need from
+// the Store — five methods, each a one-to-one mirror of a built store
+// method.
 //
-//   - RecentTrades       — A14 Observation (clamped at 20 by the handler)
-//   - TradePage          — A10 trades endpoint (keyset-paginated)
-//   - PnLSummary         — A10 pnl endpoint
-//   - CostsPerTradeIN    — A16 India per-trade cost breakdown
-//   - CostsAggregateIN   — A16 India account-level cost total
-//
-// Country knowledge (CostsPerTradeIN / CostsAggregateIN method names) is
-// deliberate at this seam: the Store already quarantines India column
-// knowledge in those two methods, and the A16 handler dispatches to
-// them under country=="IN". Adding a new country (US / etc.) means a
-// new Store method + a new dispatch case — no change to the generic
-// handler shape (BROKER_PHASE6 §6, "country-agnostic handler").
+// Country-specific method names (CostsPerTradeIN / CostsAggregateIN)
+// surface here deliberately: the Store already quarantines India
+// column knowledge in those two methods, and the costs handler
+// dispatches to them under country=="IN". Adding a new country means
+// a new Store method plus a new dispatch case — the generic handler
+// shape stays country-agnostic.
 //
 // *store.Store satisfies this interface implicitly.
 type storePort interface {
 	// RecentTrades returns the N newest closed trades for the account,
-	// ordered by exit_at DESC. The handler passes 20 for A14 (the Store
-	// also caps internally).
+	// ordered newest-first. The observation handler asks for 20; the
+	// Store also caps internally.
 	RecentTrades(
 		ctx context.Context,
 		accountID store.AccountID,
 		requestedN int,
 	) ([]store.TradeRow, error)
 
-	// TradePage returns one keyset-paginated page of closed trades for
-	// the account. before=nil means "newest page"; a non-nil before
-	// means "trades strictly older than this exit_at" (next_before
-	// cursor from the previous response).
+	// TradePage returns one keyset-paginated page. before=nil requests
+	// the newest page; a non-nil before means "trades strictly older
+	// than this exit_at" (the next-page cursor the previous response
+	// handed out).
 	TradePage(
 		ctx context.Context,
 		accountID store.AccountID,
@@ -100,9 +95,8 @@ type storePort interface {
 		before *time.Time,
 	) ([]store.TradeRow, error)
 
-	// PnLSummary returns the account-wide aggregate (sums of gross,
-	// costs, net; win/loss/trade counts). Projection over already-
-	// stored columns — no recomputation.
+	// PnLSummary returns the account-wide aggregate — a projection
+	// over already-stored columns, no recomputation.
 	PnLSummary(
 		ctx context.Context,
 		accountID store.AccountID,
@@ -110,7 +104,7 @@ type storePort interface {
 
 	// CostsPerTradeIN returns India per-trade cost breakdowns, keyset-
 	// paginated identically to TradePage. India-only by Store design;
-	// A16's handler routes here on country=="IN".
+	// the costs handler routes here on country=="IN".
 	CostsPerTradeIN(
 		ctx context.Context,
 		accountID store.AccountID,
@@ -118,8 +112,8 @@ type storePort interface {
 		before *time.Time,
 	) ([]store.TradeCostBreakdown, error)
 
-	// CostsAggregateIN returns the India account-level cost total +
-	// trade count. Projection, no recomputation.
+	// CostsAggregateIN returns the India account-level cost total plus
+	// a trade count. Projection; no recomputation.
 	CostsAggregateIN(
 		ctx context.Context,
 		accountID store.AccountID,

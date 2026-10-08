@@ -10,19 +10,11 @@ import (
 	"simulator/economy/reserve"
 )
 
-// -----------------------------------------------------------------------------
-// Stage-3 reads helper tests.
-//
-// Covers the three pure read helpers in reads.go (readBalance / readPositions
-// / readOpenOrders). The handler wrappers that stamp Present and the
-// command/facade/dispatch wiring land in Stage 4 — these tests exercise the
-// helpers directly on the goldenHarness's shard, after seedAccount puts
-// an ownedSession in sessions[goldenAccountID].
-//
-// Expectations trace to BROKER_PHASE6_IMPLEMENTATION_DESIGN §1.4 (helper
-// pseudocode) and §§2/3/4 (snapshot/view shapes), per the project's
-// "assertions trace to the spec" rule.
-// -----------------------------------------------------------------------------
+// Tests for the three pure read helpers in reads.go — readBalance,
+// readPositions, readOpenOrders. The handler wrappers that stamp
+// Present live one layer up in shard_handlers.go and are tested in
+// shard_handlers_read_test.go; these tests exercise the helpers
+// directly against a seeded shard harness.
 
 func TestReadBalance_CopiesAllFourBuckets(t *testing.T) {
 	harness := newGoldenHarness(t)
@@ -172,10 +164,10 @@ func TestReadPositions_MarkOnCacheHit(t *testing.T) {
 	}
 }
 
-// Cross-covers the ExchangeID axis of the (ExchangeID, InstrumentID) key:
-// a cache that would hit on InstrumentID alone must still miss when the
-// session's ExchangeID does not match. Guards against a regression that
-// drops the exchange arg.
+// A cache keyed on both exchange and instrument must still miss when
+// the session's exchange doesn't match, even if the instrument does.
+// Guards against a regression that drops the exchange arg from the
+// lookup and silently returns a price from the wrong market.
 func TestReadPositions_WrongExchangeMisses(t *testing.T) {
 	harness := newGoldenHarness(t)
 	session := seedPositionsAndSession(t, harness, map[contract.InstrumentID]*account.Position{
@@ -219,10 +211,11 @@ func TestReadOpenOrders_FiltersByAccount(t *testing.T) {
 	}
 }
 
-// Cross-cover of (Side × IsMarket) per [[feedback_stage_tests_cross_cover_order_types]].
-// LimitPrice must be 0 iff IsMarket; ReservedCash is populated only on buys,
-// ReservedUnits only on sells. Validates that the join pulls each field
-// from the reservation side correctly on every combo.
+// Covers all four Side × IsMarket combinations:
+//   - LimitPrice must be 0 exactly when IsMarket is true;
+//   - buy reservations hold cash (ReservedCash>0, ReservedUnits==0);
+//   - sell reservations hold units (ReservedUnits>0, ReservedCash==0).
+// Guards against the join pulling the wrong field for a given combo.
 func TestReadOpenOrders_SideAndMarketCrossCover(t *testing.T) {
 	cases := []struct {
 		name          string
@@ -300,10 +293,11 @@ func TestReadOpenOrders_SideAndMarketCrossCover(t *testing.T) {
 	}
 }
 
-// Degenerate partial-view case: a track exists but the reservation record
-// was already removed (unusual — terminal state should drop both together).
-// The helper must still ship a row with the track-side fields set and the
-// money/qty/side/price fields at their zero values.
+// A track survives but its reservation record has been removed — an
+// unusual state (settlement should drop both together), but the helper
+// must still ship a row with the track-side fields set and the money /
+// qty / side / price fields left at zero rather than silently dropping
+// the order from the response.
 func TestReadOpenOrders_TrackWithoutReservation_PartialView(t *testing.T) {
 	harness := newGoldenHarness(t)
 	harness.seedAccount(account.Cash{Available: 1_000_000}, nil)
@@ -328,11 +322,9 @@ func TestReadOpenOrders_TrackWithoutReservation_PartialView(t *testing.T) {
 	}
 }
 
-// -----------------------------------------------------------------------------
-// test-local MarketPriceCache stub that returns a LastPrice hit (the
-// goldenHarness's hotMktCacheStub answers BestAsk; separate stub keeps
-// each test's branch isolated).
-// -----------------------------------------------------------------------------
+// Test-local MarketPriceCache stub that returns a LastPrice hit. The
+// shared harness stub answers BestAsk and misses on LastPrice; keeping
+// a separate stub keeps each test's branch isolated.
 
 type lastPriceStub struct {
 	exchange   ExchangeID

@@ -202,9 +202,9 @@ func TestParseLimit(t *testing.T) {
 // recoverPanic
 // -----------------------------------------------------------------------------
 
-// handler that defers recoverPanic then panics — the recover must turn
-// the panic into a 500 with the standard errorBody. Guards the HTTP-
-// boundary panic story every Phase-6 handler relies on.
+// A handler that defers recoverPanic and then panics must respond with
+// a clean 500 + errorBody — the boundary-panic story every read
+// handler in this package relies on.
 func TestRecoverPanic_WritesInternalError(t *testing.T) {
 	testHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer recoverPanic(w, "/v1/account/balance")
@@ -222,9 +222,9 @@ func TestRecoverPanic_WritesInternalError(t *testing.T) {
 	}
 }
 
-// A handler that returns normally must NOT trip the recover (nothing to
-// recover from, nothing written) — the guard is passive on the happy
-// path.
+// A handler that returns normally must not trip the recover — it has
+// nothing to recover from, writes nothing, and must leave the already-
+// sent 200 response untouched.
 func TestRecoverPanic_NoOpOnHappyPath(t *testing.T) {
 	testHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer recoverPanic(w, "/v1/account/balance")

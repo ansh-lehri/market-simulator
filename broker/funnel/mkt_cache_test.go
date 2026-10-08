@@ -2,13 +2,13 @@ package funnel
 
 import "testing"
 
-// nopMarketCache always misses on BOTH BestAsk and LastPrice, across
-// every (ExchangeID, InstrumentID) pair we probe — a few exchange ids
-// including the empty one, times a few instrument strings including
-// the empty one, so a future "defaults for empty id" bug on either
-// axis is caught early. Phase-6 A9 position-mark degrades to
-// MarkAvailable:false on LastPrice ok=false, so this is the production
-// behavior until B10 wires a real cache.
+// nopMarketCache must miss on both BestAsk and LastPrice across every
+// (exchange, instrument) pair we probe — a few exchange ids including
+// the empty one, times a few instrument strings including the empty
+// one — so a future "defaults for empty id" bug on either axis is
+// caught early. The positions read degrades to MarkAvailable:false on
+// a LastPrice miss, which is the production behavior until the real
+// cache is wired.
 func TestNopMarketCache_AlwaysMisses(t *testing.T) {
 	cache := nopMarketCache{}
 	exchanges := []ExchangeID{"NSE-canonical", "NSE-ondemand", ""}
@@ -27,10 +27,9 @@ func TestNopMarketCache_AlwaysMisses(t *testing.T) {
 	}
 }
 
-// nopMarketCache implements MarketPriceCache — compile-time guarantee
-// the production stand-in stays in sync with the interface. If a
-// method is added to MarketPriceCache without an impl here, the file
-// fails to compile; the Phase-5 place path and the Phase-6 position-
-// mark path both dereference the interface unconditionally and must
-// stay safe.
+// Compile-time guarantee that the production stand-in stays in sync
+// with the MarketPriceCache interface. If a method is added without
+// an impl here, the file fails to compile — the market-buy place
+// path and the position-mark path both dereference the interface
+// unconditionally and must stay safe.
 var _ MarketPriceCache = nopMarketCache{}

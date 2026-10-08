@@ -33,9 +33,9 @@ func TestConfig_Validate(t *testing.T) {
 	}
 }
 
-// Every Validate error wraps ErrBadConfig so callers (bringup, tests)
-// dispatch with errors.Is on the category sentinel per
-// [[feedback_error_category_sentinels]].
+// Every Validate error wraps ErrBadConfig so callers dispatch on the
+// category sentinel with a single errors.Is check, rather than typing
+// errors.As against each future variant.
 func TestConfig_Validate_WrapsErrBadConfig(t *testing.T) {
 	err := Config{ReadTimeout: 0}.Validate()
 	if err == nil {

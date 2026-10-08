@@ -8,26 +8,23 @@ import (
 	"simulator/economy/reserve"
 )
 
-// -----------------------------------------------------------------------------
-// Stage-4 Tier-4 read handler tests.
+// Tests for the four read handler bodies in shard_handlers.go. Each
+// handler is a thin wrapper over a pure helper in reads.go (covered
+// deeply in reads_test.go); these tests exercise the handler-only
+// parts:
 //
-// Each handler is a thin wrapper over a pure reads.go helper (covered
-// deeply in reads_test.go). These tests exercise the handler-only parts:
-//
-//   1. Present:false when there is no live session on this shard
-//      (BROKER_PHASE6 §§2/3/4 — HTTP maps to 409).
+//   1. Present:false when there is no live session on this shard —
+//      the HTTP layer maps that to 409.
 //   2. Present:true + the delegated payload on a live session.
-//   3. For ReadPositions: the optional Instrument filter is threaded
+//   3. For positions, the optional Instrument filter is threaded
 //      through to the helper verbatim.
-//   4. For ReadObservation: all three sub-payloads (Balance / Positions
-//      / OpenOrders) land in one call — the composite is atomic on the
-//      shard.
+//   4. For the observation handler, all three sub-payloads (balance,
+//      positions, open orders) land in a single call — the composite
+//      must be atomic on the shard.
 //
-// Harness: goldenHarness from golden_helpers_test.go — gives us a shard
-// with a wired ReservationService, an empty sessions/tracks pair, and
-// seedAccount / seedTrack / seedReservation helpers that match the ones
-// Phase-5 goldens use.
-// -----------------------------------------------------------------------------
+// Uses the goldenHarness from golden_helpers_test.go: a shard with a
+// wired reservation service, an empty sessions/tracks pair, and
+// seedAccount / seedTrack / seedReservation helpers.
 
 // -----------------------------------------------------------------------------
 // handleReadBalance
@@ -159,9 +156,9 @@ func TestHandleReadObservation_NoLiveSession_PresentFalse(t *testing.T) {
 	}
 }
 
-// Live-session case: all three sub-payloads are filled in one call. The
-// composite is deliberately not three separate facades — this test guards
-// against regressions that silently drop a leg.
+// All three sub-payloads must fill in a single call. The composite is
+// deliberately not three separate facade calls — this test guards
+// against a regression that silently drops a leg.
 func TestHandleReadObservation_LiveSession_AllThreeLegsFilled(t *testing.T) {
 	harness := newGoldenHarness(t)
 	harness.seedAccount(account.Cash{Available: 10_000_000, Reserved: 1_000, Settled: 500, Bank: 50_000},
