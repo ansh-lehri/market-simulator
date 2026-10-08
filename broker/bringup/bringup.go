@@ -49,7 +49,13 @@ type Runtime struct {
 //  5. Open the Store's OWN Postgres pool (same cluster, independently
 //     sized via cfg.StoreMaxConns / defaultStoreMaxConns). On failure,
 //     every bundle is Close'd and the error returned.
-//  6. funnel.NewBroker(cfg.BrokerID, cfg.InboxDepth, bundles, store, money).
+//  6. funnel.NewBroker(cfg.BrokerID, cfg.InboxDepth, bundles, store,
+//     money, mktCache). mktCache is nil in Phase 6 — the Tier-5 B10
+//     ingestor (one goroutine per exchange, stamping its own
+//     ExchangeID on each Public print) is Phase 7; newShard
+//     substitutes nopMarketCache{} so the place handler stays safe.
+//     Phase 6 A9/A14 marks degrade to MarkAvailable:false in
+//     production until B10 lands.
 //  7. broker.Start() — spawn N owner goroutines; each parks on its
 //     inbox.
 //
@@ -149,7 +155,12 @@ func bringUp(ctx context.Context, brokerCfg BrokerConfig, infraCfg config.Config
 		StartingBank:    brokerCfg.StartingBank,
 		OnDemandMinimum: brokerCfg.OnDemandMinimum,
 	}
-	brokerInstance := funnel.NewBroker(brokerCfg.BrokerID, brokerCfg.InboxDepth, bundles, brokerStore, brokerMoney)
+	// Phase-6 X4: mktCache=nil → newShard substitutes nopMarketCache{}.
+	// Phase 7 (B10 tape relay) swaps a real MarketPriceCache in here;
+	// one ingestor per exchange writes under its own ExchangeID, so
+	// readers that pass sess.binding.ExchangeID land on single-writer
+	// sub-maps by construction.
+	brokerInstance := funnel.NewBroker(brokerCfg.BrokerID, brokerCfg.InboxDepth, bundles, brokerStore, brokerMoney, nil)
 	brokerInstance.Start()
 
 	slog.Info("bringup: broker up",
