@@ -24,10 +24,18 @@ type Line struct {
 // TradeCostBreakdown is one closed trade's cost view. Total is the
 // trade_costs.total column verbatim — the stored total, never
 // recomputed (BROKER_PHASE1 §3.6).
+//
+// ExitAt carries the parent participant_trades.exit_at value from the
+// mandatory join. It isn't rendered in the per-trade response body;
+// callers use it to form the next-page cursor when they walk the
+// keyset-paginated endpoint (the Store orders by pt.exit_at DESC and
+// filters with before, so the last row's ExitAt is the right cursor
+// to continue from).
 type TradeCostBreakdown struct {
 	TradeID string
 	Lines   []Line
 	Total   int64
+	ExitAt  time.Time
 }
 
 // CostAggregate is the account-level sum across every closed trade.
@@ -56,7 +64,8 @@ const selectCostsPerTradeINSQL = `SELECT pt.trade_id,
 	tc.` + india.ColumnStamp + `,
 	tc.` + india.ColumnGST + `,
 	tc.` + india.ColumnAutosquareFee + `,
-	tc.` + india.ColumnTotal + `
+	tc.` + india.ColumnTotal + `,
+	pt.exit_at
 FROM ` + india.TradeCostsTable + ` tc
 JOIN participant_trades pt ON tc.trade_id = pt.trade_id
 WHERE pt.account_id = $1 AND ($2::timestamptz IS NULL OR pt.exit_at < $2)
@@ -153,11 +162,13 @@ func (store *Store) CostsPerTradeIN(ctx context.Context, accountID AccountID, re
 	for rows.Next() {
 		var tradeID string
 		var sttAmount, exchangeAmount, sebiAmount, stampAmount, gstAmount, autosquareAmount, totalAmount int64
+		var exitAt time.Time
 		scanErr := rows.Scan(
 			&tradeID,
 			&sttAmount, &exchangeAmount, &sebiAmount,
 			&stampAmount, &gstAmount, &autosquareAmount,
 			&totalAmount,
+			&exitAt,
 		)
 		if scanErr != nil {
 			return nil, fmt.Errorf("broker/store: CostsPerTradeIN scan: %w (%v)", ErrLoadFailed, scanErr)
@@ -166,6 +177,7 @@ func (store *Store) CostsPerTradeIN(ctx context.Context, accountID AccountID, re
 			TradeID: tradeID,
 			Lines:   mapIndiaCostsToLines(sttAmount, exchangeAmount, sebiAmount, stampAmount, gstAmount, autosquareAmount),
 			Total:   totalAmount,
+			ExitAt:  exitAt,
 		})
 	}
 	if iterErr := rows.Err(); iterErr != nil {
