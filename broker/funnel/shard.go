@@ -55,10 +55,13 @@ type shard struct {
 	// Crash-resume of this counter is B9, carried.
 	seq uint64
 
-	// mktCache — Phase-5 Point-1 market-buy price seam (P5-D3). Reads
-	// BestAsk at the start of a market-buy place to size the reservation.
-	// Hard-wired to nopMarketCache{} at newShard — real impl is B10 (Tier
-	// 5), not built. Tests swap the field directly for sealed scenarios.
+	// mktCache — Phase-5 Point-1 (market-buy BestAsk) + Phase-6 Point-2
+	// (position mark LastPrice) read seam. Threaded in by NewBroker; nil
+	// is substituted with nopMarketCache{} at newShard so the place
+	// handler can dereference it unconditionally. Both methods are
+	// keyed by (ExchangeID, InstrumentID) — callers pass
+	// sess.binding.ExchangeID. Real impl is B10 (Tier 5), not built.
+	// Tests swap the field directly for sealed scenarios.
 	mktCache MarketPriceCache
 
 	// slippageBufferBps — Phase-5 market-buy buffer dial (P5-D8), copied
@@ -87,13 +90,22 @@ type shard struct {
 // (dispatch, routing, reply, Stop-drains) pass nil bundles and the shard
 // leaves resv / realiz as nil. A production BringUp (Phase 1) always
 // supplies real bundles.
-func newShard(brokerID BrokerID, inboxDepth int, bundle *capstone.Bundle) *shard {
+//
+// mktCache is Phase-5's BestAsk + Phase-6's LastPrice seam, threaded in
+// from NewBroker. nil is substituted with nopMarketCache{} so the place
+// handler's unconditional mktCache.BestAsk(...) stays safe for callers
+// (bringup, funnel-internal tests) that have no real cache to inject.
+// Real wiring is Phase 7 (B10 ingestor + WireInstance).
+func newShard(brokerID BrokerID, inboxDepth int, bundle *capstone.Bundle, mktCache MarketPriceCache) *shard {
+	if mktCache == nil {
+		mktCache = nopMarketCache{}
+	}
 	builtShard := &shard{
 		inbox:    make(chan Command, inboxDepth),
 		brokerID: brokerID,
 		sessions: make(map[AccountID]*ownedSession),
 		tracks:   make(map[OrderID]*OrderTrack),
-		mktCache: nopMarketCache{},
+		mktCache: mktCache,
 		bundle:   bundle,
 	}
 	if bundle != nil {
