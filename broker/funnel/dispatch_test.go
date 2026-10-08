@@ -20,7 +20,7 @@ import (
 // that has not been implemented yet.
 
 func TestShardDispatch_PlaceOrderSendsReply(t *testing.T) {
-	dispatchedShard := newShard("B-dispatch", 4, nil)
+	dispatchedShard := newShard("B-dispatch", 4, nil, nil)
 	replyChannel := make(chan PlaceResult, 1)
 
 	dispatchedShard.dispatch(PlaceOrder{AccountID: "acct-a", ReplyTo: replyChannel})
@@ -33,7 +33,7 @@ func TestShardDispatch_PlaceOrderSendsReply(t *testing.T) {
 }
 
 func TestShardDispatch_CancelOrderSendsReply(t *testing.T) {
-	dispatchedShard := newShard("B-dispatch", 4, nil)
+	dispatchedShard := newShard("B-dispatch", 4, nil, nil)
 	replyChannel := make(chan CancelResult, 1)
 
 	dispatchedShard.dispatch(CancelOrder{AccountID: "acct-a", OrderID: "acct-a:1", ReplyTo: replyChannel})
@@ -46,7 +46,7 @@ func TestShardDispatch_CancelOrderSendsReply(t *testing.T) {
 }
 
 func TestShardDispatch_TransferSendsReply(t *testing.T) {
-	dispatchedShard := newShard("B-dispatch", 4, nil)
+	dispatchedShard := newShard("B-dispatch", 4, nil, nil)
 	replyChannel := make(chan TransferResult, 1)
 
 	dispatchedShard.dispatch(Transfer{
@@ -65,7 +65,7 @@ func TestShardDispatch_TransferSendsReply(t *testing.T) {
 }
 
 func TestShardDispatch_ReadBalanceSendsReply(t *testing.T) {
-	dispatchedShard := newShard("B-dispatch", 4, nil)
+	dispatchedShard := newShard("B-dispatch", 4, nil, nil)
 	replyChannel := make(chan BalanceSnapshot, 1)
 
 	dispatchedShard.dispatch(ReadBalance{AccountID: "acct-a", ReplyTo: replyChannel})
@@ -78,7 +78,7 @@ func TestShardDispatch_ReadBalanceSendsReply(t *testing.T) {
 }
 
 func TestShardDispatch_ReadPositionsSendsReply(t *testing.T) {
-	dispatchedShard := newShard("B-dispatch", 4, nil)
+	dispatchedShard := newShard("B-dispatch", 4, nil, nil)
 	replyChannel := make(chan PositionsSnapshot, 1)
 
 	dispatchedShard.dispatch(ReadPositions{AccountID: "acct-a", ReplyTo: replyChannel})
@@ -94,7 +94,7 @@ func TestShardDispatch_ReadPositionsSendsReply(t *testing.T) {
 // is no reply channel to observe. A separate observation (e.g. the
 // stress test) proves that dispatch actually reached the shard.
 func TestShardDispatch_ApplyResultRunsWithoutPanic(t *testing.T) {
-	dispatchedShard := newShard("B-dispatch", 4, nil)
+	dispatchedShard := newShard("B-dispatch", 4, nil, nil)
 	// OutcomeCancelRejected with an unknown OrderID is the one settlement
 	// branch that is a safe no-op without a live reservation + track + bundle
 	// — exactly what we have in this dispatch-only harness (nil bundle,
@@ -111,7 +111,7 @@ func TestShardDispatch_ApplyResultRunsWithoutPanic(t *testing.T) {
 }
 
 func TestShardDispatch_FireStopRunsWithoutPanic(t *testing.T) {
-	dispatchedShard := newShard("B-dispatch", 4, nil)
+	dispatchedShard := newShard("B-dispatch", 4, nil, nil)
 	dispatchedShard.dispatch(FireStop{AccountID: "acct-a"})
 }
 
@@ -122,7 +122,7 @@ type unknownTestCommand struct{ accountID AccountID }
 func (c unknownTestCommand) Account() AccountID { return c.accountID }
 
 func TestShardDispatch_UnknownCommandPanics(t *testing.T) {
-	dispatchedShard := newShard("B-dispatch", 4, nil)
+	dispatchedShard := newShard("B-dispatch", 4, nil, nil)
 
 	defer func() {
 		recovered := recover()

@@ -42,7 +42,7 @@ func TestStress_MixedCommandsAcrossShards(t *testing.T) {
 	)
 
 	bundles := make([]*capstone.Bundle, shardCount)
-	brokerUnderTest := NewBroker("B-stress", inboxDepth, bundles, nil, MoneyConfig{})
+	brokerUnderTest := NewBroker("B-stress", inboxDepth, bundles, nil, MoneyConfig{}, nil)
 	brokerUnderTest.Start()
 
 	var (
@@ -147,7 +147,7 @@ func TestDeterminism_RouterOrderIsStableAcrossRuns(t *testing.T) {
 
 	priorRunTranscripts := make([][][]AccountID, runCount)
 	for runIndex := 0; runIndex < runCount; runIndex++ {
-		brokerUnderTest := NewBroker("B-determinism", inboxDepth, make([]*capstone.Bundle, shardCount), nil, MoneyConfig{})
+		brokerUnderTest := NewBroker("B-determinism", inboxDepth, make([]*capstone.Bundle, shardCount), nil, MoneyConfig{}, nil)
 
 		for _, cmd := range commands {
 			brokerUnderTest.route(cmd)

@@ -10,7 +10,7 @@ import (
 // of ":" is the account/seq split, so any shape drift here would make
 // EngineResult routing fail silently.
 func TestNextOrderID_Format(t *testing.T) {
-	shardUnderTest := newShard("B-nextid", 1, nil)
+	shardUnderTest := newShard("B-nextid", 1, nil, nil)
 	got := shardUnderTest.nextOrderID("acct-42")
 	want := "acct-42:1"
 	if got != want {
@@ -20,7 +20,7 @@ func TestNextOrderID_Format(t *testing.T) {
 
 // Monotonic within a single account: seq bumps by one per call.
 func TestNextOrderID_MonotonicPerShard(t *testing.T) {
-	shardUnderTest := newShard("B-nextid", 1, nil)
+	shardUnderTest := newShard("B-nextid", 1, nil, nil)
 	for callIndex := 1; callIndex <= 5; callIndex++ {
 		got := shardUnderTest.nextOrderID("acct-A")
 		want := fmt.Sprintf("acct-A:%d", callIndex)
@@ -36,7 +36,7 @@ func TestNextOrderID_MonotonicPerShard(t *testing.T) {
 // property guarantees settlement's accountOf parses the right owner on an
 // echoed OrderID.
 func TestNextOrderID_SharedSeqAcrossAccounts(t *testing.T) {
-	shardUnderTest := newShard("B-nextid", 1, nil)
+	shardUnderTest := newShard("B-nextid", 1, nil, nil)
 
 	first := shardUnderTest.nextOrderID("acct-A")  // acct-A:1
 	second := shardUnderTest.nextOrderID("acct-B") // acct-B:2
@@ -57,8 +57,8 @@ func TestNextOrderID_SharedSeqAcrossAccounts(t *testing.T) {
 // increment). Two shards built back-to-back must each start fresh so there is
 // no accidental cross-shard sharing.
 func TestNextOrderID_FreshShardsStartIndependent(t *testing.T) {
-	shardOne := newShard("B-one", 1, nil)
-	shardTwo := newShard("B-two", 1, nil)
+	shardOne := newShard("B-one", 1, nil, nil)
+	shardTwo := newShard("B-two", 1, nil, nil)
 
 	if got := shardOne.nextOrderID("acct-A"); got != "acct-A:1" {
 		t.Errorf("shardOne first mint = %q, want acct-A:1", got)
@@ -72,7 +72,7 @@ func TestNextOrderID_FreshShardsStartIndependent(t *testing.T) {
 // accountOf (the settlement consumer's parse). This is the whole reason the
 // shape exists — if it ever breaks, settlement routing breaks.
 func TestNextOrderID_RoundTripsThroughAccountOf(t *testing.T) {
-	shardUnderTest := newShard("B-roundtrip", 1, nil)
+	shardUnderTest := newShard("B-roundtrip", 1, nil, nil)
 	orderID := shardUnderTest.nextOrderID("acct-rt")
 
 	parsedAccount, parsed := accountOf(orderID)

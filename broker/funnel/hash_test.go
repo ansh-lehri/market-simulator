@@ -210,16 +210,16 @@ func TestNewShard_InboxDepth(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			builtShard := newShard("B-newShard", tc.inboxDepth, nil)
+			builtShard := newShard("B-newShard", tc.inboxDepth, nil, nil)
 			if builtShard == nil {
-				t.Fatalf("newShard(%d) returned nil", tc.inboxDepth)
+				t.Fatalf("newShard(%d, nil) returned nil", tc.inboxDepth)
 			}
 			if gotCap := cap(builtShard.inbox); gotCap != tc.inboxDepth {
-				t.Fatalf("newShard(%d) inbox cap = %d, want %d",
+				t.Fatalf("newShard(%d, nil) inbox cap = %d, want %d",
 					tc.inboxDepth, gotCap, tc.inboxDepth)
 			}
 			if builtShard.inbox == nil {
-				t.Fatalf("newShard(%d) inbox is nil", tc.inboxDepth)
+				t.Fatalf("newShard(%d, nil) inbox is nil", tc.inboxDepth)
 			}
 		})
 	}

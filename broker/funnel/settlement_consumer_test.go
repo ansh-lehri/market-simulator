@@ -24,7 +24,7 @@ func newConsumerHarness(t *testing.T, brokerID contract.BrokerID, shardCount int
 	// Nil bundles → shards without resv/realiz. Legal for consumer tests
 	// (we never dispatch; the handlers that would call reserve/realize
 	// never run), per NewBroker's doc comment.
-	return NewBroker(brokerID, inboxDepth, bundles, nil, MoneyConfig{})
+	return NewBroker(brokerID, inboxDepth, bundles, nil, MoneyConfig{}, nil)
 }
 
 // drainInbox pops every queued Command off a shard inbox without

@@ -59,7 +59,7 @@ func bindingFixture(sessionID SessionID, exchangeID ExchangeID) SessionBinding {
 // Empty sessions map, install arrives → session populated, reply nil.
 // Verifies every field of ownedSession matches what the command carried.
 func TestHandleInstallSession_HappyInstall(t *testing.T) {
-	shardUnderTest := newShard("B-install-test", 4, nil /*bundle*/)
+	shardUnderTest := newShard("B-install-test", 4, nil /*bundle*/, nil)
 
 	accountID := account.AccountID("acc-happy")
 	loaded := loadedAccountFixture(accountID, true /*canonical*/)
@@ -113,7 +113,7 @@ func TestHandleInstallSession_HappyInstall(t *testing.T) {
 // Install twice for the same AccountID → second returns ErrSessionAlreadyLive;
 // the FIRST install's state is unchanged. XOR invariant proof.
 func TestHandleInstallSession_XorRefusesSecondInstall(t *testing.T) {
-	shardUnderTest := newShard("B-install-xor", 4, nil)
+	shardUnderTest := newShard("B-install-xor", 4, nil, nil)
 
 	accountID := account.AccountID("acc-xor")
 	firstLoaded := loadedAccountFixture(accountID, true)
@@ -167,7 +167,7 @@ func TestHandleInstallSession_XorRefusesSecondInstall(t *testing.T) {
 // broker (routing is trivial) and the public Start/Stop lifecycle so the
 // shard's goroutine does the dispatch (not the test goroutine).
 func TestHandleInstallSession_DispatchViaRunningShard(t *testing.T) {
-	brokerUnderTest := NewBroker("B-dispatch", 4, []*capstone.Bundle{nil}, nil, MoneyConfig{})
+	brokerUnderTest := NewBroker("B-dispatch", 4, []*capstone.Bundle{nil}, nil, MoneyConfig{}, nil)
 	brokerUnderTest.Start()
 	t.Cleanup(brokerUnderTest.Stop)
 

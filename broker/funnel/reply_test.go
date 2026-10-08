@@ -23,7 +23,7 @@ import (
 // started — waitReply does not touch shards, only the reply channel the
 // test owns.
 func newBrokerForReplyTest() *Broker {
-	return NewBroker("B-reply-test", 1 /*inboxDepth*/, []*capstone.Bundle{nil}, nil /*store*/, MoneyConfig{})
+	return NewBroker("B-reply-test", 1 /*inboxDepth*/, []*capstone.Bundle{nil}, nil /*store*/, MoneyConfig{}, nil)
 }
 
 // Reply arrives with nil error (the install-success case) → waitReply

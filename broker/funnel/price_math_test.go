@@ -11,7 +11,7 @@ import (
 // without a cross-shard config lookup at place time.
 func TestNewBroker_PropagatesSlippageDialToShards(t *testing.T) {
 	bundles := []*capstone.Bundle{nil, nil, nil}
-	broker := NewBroker("B-slip", 1, bundles, nil, MoneyConfig{SlippageBufferBps: 25})
+	broker := NewBroker("B-slip", 1, bundles, nil, MoneyConfig{SlippageBufferBps: 25}, nil)
 	for shardIndex, s := range broker.shards {
 		if s.slippageBufferBps != 25 {
 			t.Errorf("shard %d: slippageBufferBps = %d, want 25", shardIndex, s.slippageBufferBps)
@@ -23,7 +23,7 @@ func TestNewBroker_PropagatesSlippageDialToShards(t *testing.T) {
 // current default, since no market-data cache is wired yet.
 func TestNewBroker_ZeroMoneyConfigLeavesShardDialZero(t *testing.T) {
 	bundles := []*capstone.Bundle{nil}
-	broker := NewBroker("B-slip-zero", 1, bundles, nil, MoneyConfig{})
+	broker := NewBroker("B-slip-zero", 1, bundles, nil, MoneyConfig{}, nil)
 	if broker.shards[0].slippageBufferBps != 0 {
 		t.Errorf("default shard dial = %d, want 0", broker.shards[0].slippageBufferBps)
 	}
