@@ -245,21 +245,33 @@ func (harness *goldenHarness) seedTrack(orderID OrderID, status OrderStatus, isM
 }
 
 // hotMktCache swaps in a MarketPriceCache stub that returns the given
-// BestAsk tick for goldenInstrument (and misses for anything else).
+// BestAsk tick for (goldenExchangeID, goldenInstrument) and misses for
+// anything else. Phase-6 LastPrice always misses here — these goldens
+// exercise the Phase-5 market-buy path, which never consults LastPrice;
+// Phase-6 position-mark goldens inject their own stub.
 func (harness *goldenHarness) hotMktCache(bestAsk contract.Ticks) {
-	harness.shard.mktCache = &hotMktCacheStub{instrument: goldenInstrument, bestAsk: bestAsk}
+	harness.shard.mktCache = &hotMktCacheStub{
+		exchange:   goldenExchangeID,
+		instrument: goldenInstrument,
+		bestAsk:    bestAsk,
+	}
 }
 
 type hotMktCacheStub struct {
+	exchange   ExchangeID
 	instrument contract.InstrumentID
 	bestAsk    contract.Ticks
 }
 
-func (stub *hotMktCacheStub) BestAsk(instrument contract.InstrumentID) (contract.Ticks, bool) {
-	if instrument != stub.instrument {
+func (stub *hotMktCacheStub) BestAsk(exchange ExchangeID, instrument contract.InstrumentID) (contract.Ticks, bool) {
+	if exchange != stub.exchange || instrument != stub.instrument {
 		return 0, false
 	}
 	return stub.bestAsk, true
+}
+
+func (stub *hotMktCacheStub) LastPrice(_ ExchangeID, _ contract.InstrumentID) (contract.Ticks, bool) {
+	return 0, false
 }
 
 // -----------------------------------------------------------------------------
