@@ -63,7 +63,7 @@ func TestStress_MixedCommandsAcrossShards(t *testing.T) {
 
 			for commandIndex := 0; commandIndex < commandsCaller; commandIndex++ {
 				accountID := AccountID(fmt.Sprintf("acct-%d", randSource.Intn(accountUniverse)))
-				switch randSource.Intn(7) {
+				switch randSource.Intn(9) {
 				case 0:
 					atomic.AddUint64(&submittedRequests, 1)
 					if _, err := brokerUnderTest.PlaceOrder(ctx, accountID, "s", OrderSpec{}); err == nil {
@@ -86,10 +86,20 @@ func TestStress_MixedCommandsAcrossShards(t *testing.T) {
 					}
 				case 4:
 					atomic.AddUint64(&submittedRequests, 1)
-					if _, err := brokerUnderTest.ReadPositions(ctx, accountID); err == nil {
+					if _, err := brokerUnderTest.ReadPositions(ctx, accountID, ""); err == nil {
 						atomic.AddUint64(&receivedReplies, 1)
 					}
 				case 5:
+					atomic.AddUint64(&submittedRequests, 1)
+					if _, err := brokerUnderTest.ReadOpenOrders(ctx, accountID); err == nil {
+						atomic.AddUint64(&receivedReplies, 1)
+					}
+				case 6:
+					atomic.AddUint64(&submittedRequests, 1)
+					if _, err := brokerUnderTest.ReadObservation(ctx, accountID); err == nil {
+						atomic.AddUint64(&receivedReplies, 1)
+					}
+				case 7:
 					atomic.AddUint64(&submittedPushes, 1)
 					// OutcomeCancelRejected is the one settlement branch
 					// that is a safe no-op when the shard has no
@@ -101,7 +111,7 @@ func TestStress_MixedCommandsAcrossShards(t *testing.T) {
 						Outcome: contract.OutcomeCancelRejected,
 						OrderID: OrderID(fmt.Sprintf("%s:1", accountID)),
 					})
-				case 6:
+				case 8:
 					atomic.AddUint64(&submittedPushes, 1)
 					brokerUnderTest.PushFireStop(accountID, StopRecord{})
 				}
