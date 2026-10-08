@@ -71,6 +71,36 @@ func shapeOrders(views []funnel.OpenOrderView) []map[string]any {
 	return rows
 }
 
+// shapeLines maps a slice of cost lines (STT, exchange, SEBI, …) into
+// the response list. Only non-zero lines reach us from the Store (the
+// mapper drops zeros), so no filtering here.
+func shapeLines(lines []store.Line) []map[string]any {
+	rows := make([]map[string]any, 0, len(lines))
+	for _, line := range lines {
+		rows = append(rows, map[string]any{
+			"name":   line.Name,
+			"amount": line.Amount,
+		})
+	}
+	return rows
+}
+
+// shapeCostBreakdowns maps per-trade cost rows for the paginated costs
+// endpoint. ExitAt is deliberately NOT in the body — it's the
+// pagination key the handler uses to form next_before, not something
+// the client needs per row.
+func shapeCostBreakdowns(breakdowns []store.TradeCostBreakdown) []map[string]any {
+	rows := make([]map[string]any, 0, len(breakdowns))
+	for _, breakdown := range breakdowns {
+		rows = append(rows, map[string]any{
+			"trade_id": breakdown.TradeID,
+			"lines":    shapeLines(breakdown.Lines),
+			"total":    breakdown.Total,
+		})
+	}
+	return rows
+}
+
 func shapeTrades(rows []store.TradeRow) []map[string]any {
 	trades := make([]map[string]any, 0, len(rows))
 	for _, row := range rows {
