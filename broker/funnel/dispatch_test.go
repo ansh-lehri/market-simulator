@@ -90,6 +90,32 @@ func TestShardDispatch_ReadPositionsSendsReply(t *testing.T) {
 	}
 }
 
+func TestShardDispatch_ReadOpenOrdersSendsReply(t *testing.T) {
+	dispatchedShard := newShard("B-dispatch", 4, nil, nil)
+	replyChannel := make(chan OpenOrdersSnapshot, 1)
+
+	dispatchedShard.dispatch(ReadOpenOrders{AccountID: "acct-a", ReplyTo: replyChannel})
+
+	select {
+	case <-replyChannel:
+	default:
+		t.Fatalf("ReadOpenOrders: dispatch did not send on ReplyTo")
+	}
+}
+
+func TestShardDispatch_ReadObservationSendsReply(t *testing.T) {
+	dispatchedShard := newShard("B-dispatch", 4, nil, nil)
+	replyChannel := make(chan ObservationLive, 1)
+
+	dispatchedShard.dispatch(ReadObservation{AccountID: "acct-a", ReplyTo: replyChannel})
+
+	select {
+	case <-replyChannel:
+	default:
+		t.Fatalf("ReadObservation: dispatch did not send on ReplyTo")
+	}
+}
+
 // Push commands: dispatch must run the handler without panicking; there
 // is no reply channel to observe. A separate observation (e.g. the
 // stress test) proves that dispatch actually reached the shard.
