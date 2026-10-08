@@ -24,6 +24,8 @@ var (
 	_ Command = Transfer{}
 	_ Command = ReadBalance{}
 	_ Command = ReadPositions{}
+	_ Command = ReadOpenOrders{}
+	_ Command = ReadObservation{}
 	_ Command = ApplyResult{}
 	_ Command = FireStop{}
 )
@@ -40,6 +42,8 @@ func TestCommand_AccountReturnsRoutingKey(t *testing.T) {
 		{"Transfer", Transfer{AccountID: wantAccount, From: account.Bank, To: account.Available, Amount: 1}},
 		{"ReadBalance", ReadBalance{AccountID: wantAccount}},
 		{"ReadPositions", ReadPositions{AccountID: wantAccount}},
+		{"ReadOpenOrders", ReadOpenOrders{AccountID: wantAccount}},
+		{"ReadObservation", ReadObservation{AccountID: wantAccount}},
 		{"ApplyResult", ApplyResult{AccountID: wantAccount}},
 		{"FireStop", FireStop{AccountID: wantAccount}},
 	}
