@@ -27,6 +27,10 @@ func (ownerShard *shard) dispatch(cmd Command) {
 		typedCmd.ReplyTo <- ownerShard.handleReadBalance(typedCmd)
 	case ReadPositions:
 		typedCmd.ReplyTo <- ownerShard.handleReadPositions(typedCmd)
+	case ReadOpenOrders:
+		typedCmd.ReplyTo <- ownerShard.handleReadOpenOrders(typedCmd)
+	case ReadObservation:
+		typedCmd.ReplyTo <- ownerShard.handleReadObservation(typedCmd)
 	case ApplyResult:
 		ownerShard.handleApplyResult(typedCmd)
 	case FireStop:
@@ -139,19 +143,112 @@ func (ownerShard *shard) handleTransfer(cmd Transfer) TransferResult {
 	}
 }
 
-// handleReadBalance is the Tier-4 live-balance-read seam. The copy-out
-// contract lives here (BROKER_TIER0 §Point-5 read rule): the handler
-// returns a by-value snapshot, never a pointer into the owned Account.
+// handleReadBalance is the Tier-4 live-balance read (A8). Thin wrapper
+// over readBalance (reads.go): liveness-check this shard's sessions,
+// return Present:false (→ HTTP 409) when the account has no live
+// session on this shard, otherwise return the four-bucket copy-out.
+// BROKER_TIER0 §Point-5 copy-out rule: the returned snapshot is a value,
+// never a pointer into the owned Account.
 func (ownerShard *shard) handleReadBalance(cmd ReadBalance) BalanceSnapshot {
-	_ = cmd
-	return BalanceSnapshot{}
+	slog.Debug("funnel: handleReadBalance begin", "account_id", cmd.AccountID)
+
+	session, live := ownerShard.sessions[cmd.AccountID]
+	if !live {
+		slog.Debug("funnel: handleReadBalance not live", "account_id", cmd.AccountID)
+		return BalanceSnapshot{Present: false}
+	}
+	snapshot := readBalance(session)
+	slog.Debug("funnel: handleReadBalance ok",
+		"account_id", cmd.AccountID,
+		"session_id", session.binding.SessionID,
+		"available", snapshot.Available,
+		"reserved", snapshot.Reserved,
+		"settled", snapshot.Settled,
+		"bank", snapshot.Bank,
+	)
+	return snapshot
 }
 
-// handleReadPositions is the Tier-4 live-positions-read seam. Same
-// copy-out contract as handleReadBalance.
+// handleReadPositions is the Tier-4 live-positions read (A9). Thin
+// wrapper over readPositions (reads.go) that threads the optional
+// Instrument filter from the command. Mark degrade (MarkAvailable:false
+// on MarketPriceCache miss) is handled by readPositions and is the
+// production behavior until Phase 7 wires a real tape relay.
 func (ownerShard *shard) handleReadPositions(cmd ReadPositions) PositionsSnapshot {
-	_ = cmd
-	return PositionsSnapshot{}
+	slog.Debug("funnel: handleReadPositions begin",
+		"account_id", cmd.AccountID,
+		"instrument", cmd.Instrument,
+	)
+
+	session, live := ownerShard.sessions[cmd.AccountID]
+	if !live {
+		slog.Debug("funnel: handleReadPositions not live", "account_id", cmd.AccountID)
+		return PositionsSnapshot{Present: false}
+	}
+	snapshot := PositionsSnapshot{
+		Present:   true,
+		Positions: readPositions(ownerShard, session, cmd.Instrument),
+	}
+	slog.Debug("funnel: handleReadPositions ok",
+		"account_id", cmd.AccountID,
+		"session_id", session.binding.SessionID,
+		"instrument_filter", cmd.Instrument,
+		"row_count", len(snapshot.Positions),
+	)
+	return snapshot
+}
+
+// handleReadOpenOrders is the Tier-4 live-open-orders read (A11). Thin
+// wrapper over readOpenOrders (reads.go). The account's working set is
+// filtered out of the shard-wide tracks map; terminal orders are already
+// deleted at settlement so what survives is open-set by construction.
+func (ownerShard *shard) handleReadOpenOrders(cmd ReadOpenOrders) OpenOrdersSnapshot {
+	slog.Debug("funnel: handleReadOpenOrders begin", "account_id", cmd.AccountID)
+
+	session, live := ownerShard.sessions[cmd.AccountID]
+	if !live {
+		slog.Debug("funnel: handleReadOpenOrders not live", "account_id", cmd.AccountID)
+		return OpenOrdersSnapshot{Present: false}
+	}
+	snapshot := OpenOrdersSnapshot{
+		Present: true,
+		Orders:  readOpenOrders(ownerShard, cmd.AccountID),
+	}
+	slog.Debug("funnel: handleReadOpenOrders ok",
+		"account_id", cmd.AccountID,
+		"session_id", session.binding.SessionID,
+		"row_count", len(snapshot.Orders),
+	)
+	return snapshot
+}
+
+// handleReadObservation is the Tier-4 composite live snapshot (A14).
+// Three helpers run back-to-back in ONE shard visit so the balance,
+// positions, and open-orders rows cannot interleave with a settlement
+// fill — the whole reason this is a dedicated command rather than three
+// separate facade calls. The durable "recent closed trades" half is
+// fanned out by the HTTP handler, not here.
+func (ownerShard *shard) handleReadObservation(cmd ReadObservation) ObservationLive {
+	slog.Debug("funnel: handleReadObservation begin", "account_id", cmd.AccountID)
+
+	session, live := ownerShard.sessions[cmd.AccountID]
+	if !live {
+		slog.Debug("funnel: handleReadObservation not live", "account_id", cmd.AccountID)
+		return ObservationLive{Present: false}
+	}
+	observation := ObservationLive{
+		Present:    true,
+		Balance:    readBalance(session),
+		Positions:  readPositions(ownerShard, session, ""),
+		OpenOrders: readOpenOrders(ownerShard, cmd.AccountID),
+	}
+	slog.Debug("funnel: handleReadObservation ok",
+		"account_id", cmd.AccountID,
+		"session_id", session.binding.SessionID,
+		"position_rows", len(observation.Positions),
+		"order_rows", len(observation.OpenOrders),
+	)
+	return observation
 }
 
 // handleApplyResult — Tier-1 settlement body — lives in settle.go
