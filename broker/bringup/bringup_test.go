@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -131,6 +133,20 @@ func TestBringUp_BadConfig_NegativeOnDemandMinimum(t *testing.T) {
 	}
 }
 
+// Negative HTTP timeouts are a programming error at the caller — surface
+// them as ErrBadConfig alongside the other config checks. Zero stays
+// legal (it falls through to the package default); only negative is
+// rejected.
+func TestBringUp_BadConfig_NegativeReadTimeout(t *testing.T) {
+	badCfg := defaultCfg()
+	badCfg.ReadTimeout = -1 * time.Millisecond
+	_, err := bringUp(context.Background(), badCfg, config.Config{})
+	if !errors.Is(err, ErrBadConfig) {
+		t.Fatalf("err: got %v, want ErrBadConfig", err)
+	}
+}
+
+
 // Country allowlist: "US" is in the allowlist but returns
 // ErrCountryUnavailable (slot defined, body not built). Fires AFTER
 // validate() but BEFORE any pool opens — observable because the error
@@ -257,6 +273,127 @@ func TestBringUp_And_Shutdown_HappyPath_ShardCount1(t *testing.T) {
 		t.Fatalf("BringUp: %v", err)
 	}
 	runtime.Shutdown()
+}
+
+// Every read route the runtime is responsible for must be reachable
+// on Runtime.Mux. A regression that drops one of the NewXHandler
+// registrations would route to the mux's default 404 handler instead
+// of our handler. We confirm registration by issuing a GET with no
+// account_id — every reads handler responds with 400 "account_id
+// required" (its own first check), never a mux 404. A 404 here would
+// mean the path wasn't registered.
+//
+// Transfer is NOT registered by bringup (see buildMux doc for the
+// cycle rationale), so it is not asserted here.
+func TestBringUp_Mux_RegistersAllReadRoutes(t *testing.T) {
+	infraCfg := testInfraCfg(t)
+	runtime, err := bringUp(context.Background(), defaultCfg(), infraCfg)
+	if err != nil {
+		t.Fatalf("BringUp: %v", err)
+	}
+	t.Cleanup(runtime.Shutdown)
+
+	if runtime.Mux == nil {
+		t.Fatal("Runtime.Mux is nil")
+	}
+
+	paths := []string{
+		"/v1/account/balance",
+		"/v1/account/positions",
+		"/v1/account/orders",
+		"/v1/account/observation",
+		"/v1/account/trades",
+		"/v1/account/pnl",
+		"/v1/account/costs",
+		"/v1/account/costs/summary",
+		// Phase 7: GET /v1/candles (market-data history). Same probe
+		// shape — a bare GET without the required ?market=/?instrument=
+		// params hits the handler's own validation and returns 400,
+		// NOT a 404 from the mux. A 404 means the route was dropped.
+		"/v1/candles",
+	}
+	for _, path := range paths {
+		t.Run(path, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, path, nil)
+			recorder := httptest.NewRecorder()
+			runtime.Mux.ServeHTTP(recorder, request)
+			if recorder.Code == http.StatusNotFound {
+				t.Fatalf("mux returned 404 — route not registered")
+			}
+		})
+	}
+}
+
+// Phase 7: Runtime.Market is populated by BringUp — L7 (when it
+// exists) reaches into it to call WireInstance per exchange instance.
+// Also smoke-tests that the market-data registry is non-nil + empty
+// at bringup (no instances wired yet), which is also exactly what
+// got injected as funnel.NewBroker's mktCache (replaces Phase-6 nil).
+func TestBringUp_MarketData_Available(t *testing.T) {
+	infraCfg := testInfraCfg(t)
+	runtime, err := bringUp(context.Background(), defaultCfg(), infraCfg)
+	if err != nil {
+		t.Fatalf("BringUp: %v", err)
+	}
+	t.Cleanup(runtime.Shutdown)
+
+	if runtime.Market == nil {
+		t.Fatal("Runtime.Market: got nil — bringup did not wire MarketData")
+	}
+	registry := runtime.Market.MarketPriceCache()
+	if registry == nil {
+		t.Fatal("Runtime.Market.MarketPriceCache(): got nil")
+	}
+	if got := registry.InstanceCount(); got != 0 {
+		t.Errorf("InstanceCount at bringup: got %d, want 0 (no instances yet — L7 drives WireInstance)", got)
+	}
+	// Account-side price seam reads miss cleanly on an empty registry
+	// (no exch wired). This mirrors the Phase-6 nopMarketCache
+	// behavior, but now flowing through the real registry — a BestAsk
+	// hit becomes possible once L7 calls WireInstance.
+	if _, ok := registry.BestAsk("E1", "ACME"); ok {
+		t.Error("BestAsk at bringup: unexpected hit on empty registry")
+	}
+}
+
+// WS is NOT registered by bringup today — the per-session FanOut
+// dispatcher is L7's seam. This test proves /v1/ws is 404 at bringup
+// so a future change that adds a stub /v1/ws here (without the L7
+// dispatcher) breaks loudly rather than silently serving dead
+// connections.
+func TestBringUp_Mux_DoesNotRegisterWSYet(t *testing.T) {
+	infraCfg := testInfraCfg(t)
+	runtime, err := bringUp(context.Background(), defaultCfg(), infraCfg)
+	if err != nil {
+		t.Fatalf("BringUp: %v", err)
+	}
+	t.Cleanup(runtime.Shutdown)
+
+	request := httptest.NewRequest(http.MethodGet, "/v1/ws", nil)
+	recorder := httptest.NewRecorder()
+	runtime.Mux.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("/v1/ws unexpectedly registered: status=%d (want 404 — L7 owns this route)", recorder.Code)
+	}
+}
+
+// Transfer is NOT registered by bringup — the caller wires it onto
+// runtime.Mux themselves. This test proves the current behaviour so
+// a future change that adds transfer back here breaks loudly.
+func TestBringUp_Mux_DoesNotRegisterTransfer(t *testing.T) {
+	infraCfg := testInfraCfg(t)
+	runtime, err := bringUp(context.Background(), defaultCfg(), infraCfg)
+	if err != nil {
+		t.Fatalf("BringUp: %v", err)
+	}
+	t.Cleanup(runtime.Shutdown)
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/account/transfer", nil)
+	recorder := httptest.NewRecorder()
+	runtime.Mux.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("transfer route unexpectedly registered: status=%d (want 404)", recorder.Code)
+	}
 }
 
 // Idempotent Shutdown: a second call is a safe no-op.

@@ -3,16 +3,36 @@ package bringup
 import (
 	"errors"
 	"fmt"
+	"time"
 
 	"simulator/broker/funnel"
 )
 
 // defaultStoreMaxConns is the Store pool's conservative size when the
 // caller leaves BrokerConfig.StoreMaxConns at zero. The Store serves
-// the five Phase-3+ durable reads + the durable transfer — a few
-// concurrent reads at a time; 4 lets the pool breathe without eating
-// Postgres connection budget that the per-shard bundles need.
+// the five durable reads + the durable transfer — a few concurrent
+// reads at a time; 4 lets the pool breathe without eating Postgres
+// connection budget that the per-shard bundles need.
 const defaultStoreMaxConns int32 = 4
+
+// defaultReadTimeout is the per-request deadline every read HTTP
+// handler uses when the caller leaves BrokerConfig.ReadTimeout at
+// zero. The value is a reasonable dial for tests and demos, not a
+// production number — a real deploy sets ReadTimeout explicitly.
+const defaultReadTimeout = 2 * time.Second
+
+// Phase-7 (B10 tape relay + market-data component) tunables. Dials
+// live here so bringup validates once; marketdata.NewMarketData reads
+// marketdata.Config{ReadTimeout} + marketdata.WSConfig{...} composed
+// from these. Stage-5 default values; a real deploy sets them.
+const (
+	defaultCandleReadTimeout     = 2 * time.Second
+	defaultWSConnBuffer          = 256
+	defaultWSLagEvictionThresh   = 32
+	defaultWSPingInterval        = 30 * time.Second
+	defaultWSReadTimeout         = 60 * time.Second
+	defaultWSWriteTimeout        = 10 * time.Second
+)
 
 // BrokerConfig is the broker's own dials — distinct from
 // connectivity.Config (which carries infra DSNs + pool sizing for the
@@ -66,6 +86,43 @@ type BrokerConfig struct {
 	// be >= 0; zero means "no bar" (every account qualifies). The actual
 	// value is an open dial per the Phase-2 doc.
 	OnDemandMinimum int64
+
+	// ReadTimeout bounds every read HTTP handler's broker + store
+	// round-trips. Zero → defaultReadTimeout (bringup is caller-
+	// friendly — a test that doesn't care about timeouts gets a
+	// workable default). Negative → ErrBadConfig.
+	ReadTimeout time.Duration
+
+	// --- Phase-7 (B10 market-data) tunables ---------------------------
+	// All six fall back to default* consts on zero; validate rejects
+	// negatives. Threaded into marketdata.NewMarketData at bringUp as
+	// marketdata.Config{ReadTimeout: CandleReadTimeout} and
+	// marketdata.WSConfig{the other five}.
+
+	// CandleReadTimeout bounds the GET /v1/candles handler per-request
+	// deadline. Zero → defaultCandleReadTimeout. Negative → ErrBadConfig.
+	CandleReadTimeout time.Duration
+
+	// WSConnBuffer is the per-WS-connection outbound-frame buffer size.
+	// Zero → defaultWSConnBuffer. Negative → ErrBadConfig.
+	WSConnBuffer int
+
+	// WSLagEvictionThreshold is the consecutive-drop count that triggers
+	// slow-client eviction on a WS conn. Zero → defaultWSLagEvictionThresh.
+	// Negative → ErrBadConfig.
+	WSLagEvictionThreshold int
+
+	// WSPingInterval is how often the WS writeLoop sends a gorilla
+	// control-frame ping. Zero → defaultWSPingInterval. Negative → ErrBadConfig.
+	WSPingInterval time.Duration
+
+	// WSReadTimeout is the WS socket read deadline (reset on each pong).
+	// Zero → defaultWSReadTimeout. Negative → ErrBadConfig.
+	WSReadTimeout time.Duration
+
+	// WSWriteTimeout is the WS socket write deadline (per push + ping).
+	// Zero → defaultWSWriteTimeout. Negative → ErrBadConfig.
+	WSWriteTimeout time.Duration
 }
 
 // ErrBadConfig wraps BrokerConfig validation failures. Category sentinel
@@ -97,6 +154,27 @@ func (brokerCfg BrokerConfig) validate() error {
 	if brokerCfg.OnDemandMinimum < 0 {
 		return fmt.Errorf("OnDemandMinimum=%d (must be >= 0): %w", brokerCfg.OnDemandMinimum, ErrBadConfig)
 	}
+	if brokerCfg.ReadTimeout < 0 {
+		return fmt.Errorf("ReadTimeout=%v (must be >= 0; zero means default): %w", brokerCfg.ReadTimeout, ErrBadConfig)
+	}
+	if brokerCfg.CandleReadTimeout < 0 {
+		return fmt.Errorf("CandleReadTimeout=%v (must be >= 0): %w", brokerCfg.CandleReadTimeout, ErrBadConfig)
+	}
+	if brokerCfg.WSConnBuffer < 0 {
+		return fmt.Errorf("WSConnBuffer=%d (must be >= 0): %w", brokerCfg.WSConnBuffer, ErrBadConfig)
+	}
+	if brokerCfg.WSLagEvictionThreshold < 0 {
+		return fmt.Errorf("WSLagEvictionThreshold=%d (must be >= 0): %w", brokerCfg.WSLagEvictionThreshold, ErrBadConfig)
+	}
+	if brokerCfg.WSPingInterval < 0 {
+		return fmt.Errorf("WSPingInterval=%v (must be >= 0): %w", brokerCfg.WSPingInterval, ErrBadConfig)
+	}
+	if brokerCfg.WSReadTimeout < 0 {
+		return fmt.Errorf("WSReadTimeout=%v (must be >= 0): %w", brokerCfg.WSReadTimeout, ErrBadConfig)
+	}
+	if brokerCfg.WSWriteTimeout < 0 {
+		return fmt.Errorf("WSWriteTimeout=%v (must be >= 0): %w", brokerCfg.WSWriteTimeout, ErrBadConfig)
+	}
 	return nil
 }
 
@@ -109,4 +187,63 @@ func (brokerCfg BrokerConfig) storeMaxConnsOrDefault() int32 {
 		return defaultStoreMaxConns
 	}
 	return brokerCfg.StoreMaxConns
+}
+
+// readTimeoutOrDefault returns the configured ReadTimeout, falling
+// back to defaultReadTimeout on zero. validate() already rejects
+// negatives, so this helper only handles the "zero → default" branch
+// — the Config.Validate inside each handler constructor requires a
+// strictly-positive value, so we hand it a non-zero number here.
+func (brokerCfg BrokerConfig) readTimeoutOrDefault() time.Duration {
+	if brokerCfg.ReadTimeout == 0 {
+		return defaultReadTimeout
+	}
+	return brokerCfg.ReadTimeout
+}
+
+// --- Phase-7 marketdata zero-to-default accessors ---------------------
+// Each handles the "zero means default" branch (negatives were already
+// rejected by validate). Downstream Config/WSConfig validation requires
+// strictly-positive, so these ensure a non-zero handoff.
+
+func (brokerCfg BrokerConfig) candleReadTimeoutOrDefault() time.Duration {
+	if brokerCfg.CandleReadTimeout == 0 {
+		return defaultCandleReadTimeout
+	}
+	return brokerCfg.CandleReadTimeout
+}
+
+func (brokerCfg BrokerConfig) wsConnBufferOrDefault() int {
+	if brokerCfg.WSConnBuffer == 0 {
+		return defaultWSConnBuffer
+	}
+	return brokerCfg.WSConnBuffer
+}
+
+func (brokerCfg BrokerConfig) wsLagEvictionThresholdOrDefault() int {
+	if brokerCfg.WSLagEvictionThreshold == 0 {
+		return defaultWSLagEvictionThresh
+	}
+	return brokerCfg.WSLagEvictionThreshold
+}
+
+func (brokerCfg BrokerConfig) wsPingIntervalOrDefault() time.Duration {
+	if brokerCfg.WSPingInterval == 0 {
+		return defaultWSPingInterval
+	}
+	return brokerCfg.WSPingInterval
+}
+
+func (brokerCfg BrokerConfig) wsReadTimeoutOrDefault() time.Duration {
+	if brokerCfg.WSReadTimeout == 0 {
+		return defaultWSReadTimeout
+	}
+	return brokerCfg.WSReadTimeout
+}
+
+func (brokerCfg BrokerConfig) wsWriteTimeoutOrDefault() time.Duration {
+	if brokerCfg.WSWriteTimeout == 0 {
+		return defaultWSWriteTimeout
+	}
+	return brokerCfg.WSWriteTimeout
 }

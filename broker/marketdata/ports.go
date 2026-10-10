@@ -35,3 +35,15 @@ type candleStorePort interface {
 type queryEnginePort interface {
 	QueryCandles(ctx context.Context, query CandleQuery) (CandlePage, error)
 }
+
+// candleInserter is the minimal shape the ingestor needs from the
+// durable candle layer. One method — Insert — mirroring CandleStore.
+// *CandleStore satisfies this implicitly.
+//
+// Separated from candleStorePort so the ingestor tests can swap in a
+// pure in-memory fake without a test DB, and the ingestor's hot path
+// doesn't accidentally reach for RangeRead1m (it has no business doing
+// so — read is HTTP's job).
+type candleInserter interface {
+	Insert(ctx context.Context, candle Candle) error
+}

@@ -4,9 +4,12 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"sync"
 
 	"simulator/broker/funnel"
+	"simulator/broker/marketdata"
+	"simulator/broker/reads"
 	"simulator/broker/store"
 	"simulator/connectivity/config"
 	"simulator/connectivity/db"
@@ -29,6 +32,25 @@ type Runtime struct {
 	Broker *funnel.Broker
 	Store  *store.Store
 
+	// Market is the Phase-7 (B10) market-data holder — process-lifetime
+	// pieces (CandleStore, ReadEngine, CacheRegistry). L7 (when it
+	// exists) calls Market.WireInstance per exchange instance; the
+	// CacheRegistry inside Market is also the funnel.MarketPriceCache
+	// injected into the broker (replaces the Phase-6 nil). Exposed so
+	// L7 can reach it.
+	Market *marketdata.MarketData
+
+	// Mux carries the account read routes (eight from broker/reads)
+	// PLUS the Phase-7 GET /v1/candles history route. Exposed as
+	// *http.ServeMux (not http.Handler) so callers can register more
+	// routes on it — health probes, admin surfaces, metrics scraping,
+	// the bank-transfer handler, and L7's own /v1/ws dispatcher. The
+	// bank-transfer handler is deliberately not registered here (see
+	// buildMux below for the cycle rationale); /v1/ws likewise waits
+	// on L7 because the per-session FanOut dispatch is L7's seam, not
+	// marketdata's.
+	Mux *http.ServeMux
+
 	bundles []*capstone.Bundle
 
 	// shutdownOnce makes Shutdown idempotent — callers typically defer
@@ -49,14 +71,17 @@ type Runtime struct {
 //  5. Open the Store's OWN Postgres pool (same cluster, independently
 //     sized via cfg.StoreMaxConns / defaultStoreMaxConns). On failure,
 //     every bundle is Close'd and the error returned.
-//  6. funnel.NewBroker(cfg.BrokerID, cfg.InboxDepth, bundles, store,
-//     money, mktCache). mktCache is nil in Phase 6 — the Tier-5 B10
-//     ingestor (one goroutine per exchange, stamping its own
-//     ExchangeID on each Public print) is Phase 7; newShard
-//     substitutes nopMarketCache{} so the place handler stays safe.
-//     Phase 6 A9/A14 marks degrade to MarkAvailable:false in
-//     production until B10 lands.
-//  7. broker.Start() — spawn N owner goroutines; each parks on its
+//  6. marketdata.NewMarketData — build the Phase-7 (B10) holder:
+//     CandleStore borrowed from brokerStore.Pool(), ReadEngine, and
+//     the CacheRegistry (empty, no instances yet). Threaded tunables
+//     for the HTTP /candles read + WS transport come from BrokerConfig.
+//  7. funnel.NewBroker(cfg.BrokerID, cfg.InboxDepth, bundles, store,
+//     money, marketData.MarketPriceCache()). The registry structurally
+//     satisfies funnel.MarketPriceCache; readers that pass
+//     sess.binding.ExchangeID land on the right instance's snapshot.
+//     Account-side marks stop degrading to MarkAvailable:false once
+//     L7 begins calling marketData.WireInstance per exchange instance.
+//  8. broker.Start() — spawn N owner goroutines; each parks on its
 //     inbox.
 //
 // End state: N shard owners (empty, parked) + N closed-trade drainers
@@ -150,18 +175,42 @@ func bringUp(ctx context.Context, brokerCfg BrokerConfig, infraCfg config.Config
 	storeLifecycle := lifecycle.NewService(storePersist)
 
 	brokerStore := store.NewStore(storePool, storeRedis, storeLifecycle)
+
+	// Phase-7 (B10): build the market-data holder BEFORE NewBroker so
+	// the CacheRegistry inside can be injected as mktCache (replaces
+	// the Phase-6 nil). CandleStore shares brokerStore's pool via
+	// Pool() — borrowed, not owned (store.Close handles pool teardown).
+	marketDataCandleCfg := marketdata.Config{
+		ReadTimeout: brokerCfg.candleReadTimeoutOrDefault(),
+	}
+	marketDataWSCfg := marketdata.WSConfig{
+		ConnBuffer:           brokerCfg.wsConnBufferOrDefault(),
+		LagEvictionThreshold: brokerCfg.wsLagEvictionThresholdOrDefault(),
+		PingInterval:         brokerCfg.wsPingIntervalOrDefault(),
+		ReadTimeout:          brokerCfg.wsReadTimeoutOrDefault(),
+		WriteTimeout:         brokerCfg.wsWriteTimeoutOrDefault(),
+	}
+	marketData := marketdata.NewMarketData(brokerStore.Pool(), marketDataCandleCfg, marketDataWSCfg)
+
 	brokerMoney := funnel.MoneyConfig{
 		StartingCapital: brokerCfg.StartingCapital,
 		StartingBank:    brokerCfg.StartingBank,
 		OnDemandMinimum: brokerCfg.OnDemandMinimum,
 	}
-	// Phase-6 X4: mktCache=nil → newShard substitutes nopMarketCache{}.
-	// Phase 7 (B10 tape relay) swaps a real MarketPriceCache in here;
-	// one ingestor per exchange writes under its own ExchangeID, so
-	// readers that pass sess.binding.ExchangeID land on single-writer
-	// sub-maps by construction.
-	brokerInstance := funnel.NewBroker(brokerCfg.BrokerID, brokerCfg.InboxDepth, bundles, brokerStore, brokerMoney, nil)
+	// Phase-7 wire-up: pass marketData.MarketPriceCache() as mktCache.
+	// Structural interface match — the registry's BestAsk/LastPrice
+	// signatures match funnel.MarketPriceCache (both ExchangeID aliases
+	// resolve to string). Readers that pass sess.binding.ExchangeID
+	// land on the right instance's MarketSnapshot. Account-side marks
+	// stop degrading to MarkAvailable:false once L7 starts calling
+	// marketData.WireInstance per exchange instance.
+	brokerInstance := funnel.NewBroker(
+		brokerCfg.BrokerID, brokerCfg.InboxDepth, bundles, brokerStore, brokerMoney,
+		marketData.MarketPriceCache(),
+	)
 	brokerInstance.Start()
+
+	httpMux := buildMux(brokerInstance, brokerStore, marketData, brokerCfg)
 
 	slog.Info("bringup: broker up",
 		"broker_id", brokerCfg.BrokerID,
@@ -169,11 +218,63 @@ func bringUp(ctx context.Context, brokerCfg BrokerConfig, infraCfg config.Config
 		"inbox_depth", brokerCfg.InboxDepth,
 		"country", brokerCfg.Country,
 		"store_max_conns", brokerCfg.storeMaxConnsOrDefault(),
+		"read_timeout", brokerCfg.readTimeoutOrDefault(),
 		"store_lifecycle", "unstarted-component",
 	)
 	return &Runtime{
 		Broker:  brokerInstance,
 		Store:   brokerStore,
+		Market:  marketData,
+		Mux:     httpMux,
 		bundles: bundles,
 	}, nil
+}
+
+// buildMux constructs the HTTP mux and registers:
+//   - the eight account read routes from broker/reads
+//   - the Phase-7 GET /v1/candles history route from broker/marketdata
+//
+// The bank-transfer handler is deliberately NOT registered here. Its
+// integration tests already import this package, so pulling
+// broker/transfer in from bringup would introduce a build-time import
+// cycle. The caller wires it with:
+//
+//     runtime.Mux.Handle(
+//         transfer.Path,
+//         transfer.NewHandler(runtime.Broker, runtime.Store,
+//             transfer.Config{TransferTimeout: cfg.TransferTimeout}),
+//     )
+//
+// after BringUp returns. GET /v1/ws is likewise NOT registered here —
+// the per-session FanOut dispatch is L7's seam (marketdata/CLAUDE.md
+// explicitly scopes "session→FanOut binding" out of this component).
+// L7 will register /v1/ws against its own dispatcher once it exists;
+// the WSConfig for that handler is already held on marketData.WSConfig().
+//
+// Keeping transfer/ws on the caller side is one extra line each at
+// the wiring root in exchange for a clean dependency graph. The reads
+// + marketdata packages have no back-import into bringup, so their
+// handlers can be registered here without any cycle.
+func buildMux(
+	brokerInstance *funnel.Broker,
+	brokerStore *store.Store,
+	marketData *marketdata.MarketData,
+	brokerCfg BrokerConfig,
+) *http.ServeMux {
+	readsCfg := reads.Config{ReadTimeout: brokerCfg.readTimeoutOrDefault()}
+
+	mux := http.NewServeMux()
+	mux.Handle(reads.PathBalance, reads.NewBalanceHandler(brokerInstance, readsCfg))
+	mux.Handle(reads.PathPositions, reads.NewPositionsHandler(brokerInstance, readsCfg))
+	mux.Handle(reads.PathOrders, reads.NewOrdersHandler(brokerInstance, readsCfg))
+	mux.Handle(reads.PathObservation, reads.NewObservationHandler(brokerInstance, brokerStore, readsCfg))
+	mux.Handle(reads.PathTrades, reads.NewTradesHandler(brokerStore, readsCfg))
+	mux.Handle(reads.PathPnL, reads.NewPnLHandler(brokerStore, readsCfg))
+	mux.Handle(reads.PathCosts, reads.NewCostsHandler(brokerStore, readsCfg))
+	mux.Handle(reads.PathCostsSummary, reads.NewCostsSummaryHandler(brokerStore, readsCfg))
+
+	marketData.RegisterCandlesRoute(mux)
+
+	slog.Info("bringup: http mux built", "read_routes", 8, "marketdata_routes", 1)
+	return mux
 }
