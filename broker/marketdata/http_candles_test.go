@@ -44,14 +44,14 @@ func mustBuildHandler(t *testing.T, engine queryEnginePort, cfg Config) http.Han
 // to drive a specific failure branch (one 400 case per test). Keeps the
 // "what's being probed" obvious at each call site.
 func validParams() url.Values {
-	v := url.Values{}
-	v.Set("market", "IN")
-	v.Set("instrument", "ACME")
-	v.Set("timeframe", "5m")
-	v.Set("from", "2026-10-10T09:00:00")
-	v.Set("to", "2026-10-10T10:00:00")
-	v.Set("limit", "10")
-	return v
+	params := url.Values{}
+	params.Set("market", "IN")
+	params.Set("instrument", "ACME")
+	params.Set("timeframe", "5m")
+	params.Set("from", "2026-10-10T09:00:00")
+	params.Set("to", "2026-10-10T10:00:00")
+	params.Set("limit", "10")
+	return params
 }
 
 func doRequest(t *testing.T, handler http.Handler, params url.Values) *httptest.ResponseRecorder {
@@ -114,23 +114,23 @@ func TestServeHTTP_BadParams_400(t *testing.T) {
 		name   string
 		mutate func(url.Values)
 	}{
-		{"missing_market", func(v url.Values) { v.Del("market") }},
-		{"unknown_market", func(v url.Values) { v.Set("market", "ZZ") }},
-		{"missing_instrument", func(v url.Values) { v.Del("instrument") }},
-		{"missing_timeframe", func(v url.Values) { v.Del("timeframe") }},
-		{"off_allowlist_timeframe", func(v url.Values) { v.Set("timeframe", "15m") }},
-		{"off_allowlist_timeframe_1h", func(v url.Values) { v.Set("timeframe", "1h") }},
-		{"timeframe_case_sensitive", func(v url.Values) { v.Set("timeframe", "5M") }},
-		{"missing_from", func(v url.Values) { v.Del("from") }},
-		{"missing_to", func(v url.Values) { v.Del("to") }},
-		{"unparseable_from", func(v url.Values) { v.Set("from", "not-a-time") }},
-		{"unparseable_to", func(v url.Values) { v.Set("to", "yesterday") }},
-		{"from_equals_to", func(v url.Values) { v.Set("to", v.Get("from")) }},
-		{"from_after_to", func(v url.Values) { v.Set("from", "2026-10-10T11:00:00") }},
-		{"bad_cursor", func(v url.Values) { v.Set("cursor", "garbage") }},
-		{"limit_zero", func(v url.Values) { v.Set("limit", "0") }},
-		{"limit_negative", func(v url.Values) { v.Set("limit", "-5") }},
-		{"limit_non_integer", func(v url.Values) { v.Set("limit", "ten") }},
+		{"missing_market", func(params url.Values) { params.Del("market") }},
+		{"unknown_market", func(params url.Values) { params.Set("market", "ZZ") }},
+		{"missing_instrument", func(params url.Values) { params.Del("instrument") }},
+		{"missing_timeframe", func(params url.Values) { params.Del("timeframe") }},
+		{"off_allowlist_timeframe", func(params url.Values) { params.Set("timeframe", "15m") }},
+		{"off_allowlist_timeframe_1h", func(params url.Values) { params.Set("timeframe", "1h") }},
+		{"timeframe_case_sensitive", func(params url.Values) { params.Set("timeframe", "5M") }},
+		{"missing_from", func(params url.Values) { params.Del("from") }},
+		{"missing_to", func(params url.Values) { params.Del("to") }},
+		{"unparseable_from", func(params url.Values) { params.Set("from", "not-a-time") }},
+		{"unparseable_to", func(params url.Values) { params.Set("to", "yesterday") }},
+		{"from_equals_to", func(params url.Values) { params.Set("to", params.Get("from")) }},
+		{"from_after_to", func(params url.Values) { params.Set("from", "2026-10-10T11:00:00") }},
+		{"bad_cursor", func(params url.Values) { params.Set("cursor", "garbage") }},
+		{"limit_zero", func(params url.Values) { params.Set("limit", "0") }},
+		{"limit_negative", func(params url.Values) { params.Set("limit", "-5") }},
+		{"limit_non_integer", func(params url.Values) { params.Set("limit", "ten") }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

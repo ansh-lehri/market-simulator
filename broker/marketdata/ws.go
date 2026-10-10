@@ -120,7 +120,7 @@ func (handlerInstance *wsHandler) ServeHTTP(responseWriter http.ResponseWriter, 
 	}
 	conn := NewConn(socket, handlerInstance.cfg.ConnBuffer)
 	slog.Info("broker/marketdata: WS connected",
-		"exch", handlerInstance.fanOut.snap.Exch(),
+		"exch", handlerInstance.fanOut.marketSnapshot.Exch(),
 		"market", handlerInstance.fanOut.market,
 	)
 
@@ -145,7 +145,7 @@ func (handlerInstance *wsHandler) ServeHTTP(responseWriter http.ResponseWriter, 
 	handlerInstance.readLoop(conn)
 	<-writeLoopDone
 	slog.Info("broker/marketdata: WS disconnected",
-		"exch", handlerInstance.fanOut.snap.Exch(),
+		"exch", handlerInstance.fanOut.marketSnapshot.Exch(),
 	)
 }
 

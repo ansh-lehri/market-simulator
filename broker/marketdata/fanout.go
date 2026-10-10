@@ -21,8 +21,8 @@ const (
 	streamCandle
 )
 
-func (s stream) String() string {
-	switch s {
+func (name stream) String() string {
+	switch name {
 	case streamSnapshot:
 		return "snapshot"
 	case streamCandle:
@@ -33,8 +33,8 @@ func (s stream) String() string {
 
 // parseStream maps the wire string to a stream. Off-allowlist returns
 // (0, false). The WS handler nacks the sub with "bad stream".
-func parseStream(s string) (stream, bool) {
-	switch s {
+func parseStream(wireName string) (stream, bool) {
+	switch wireName {
 	case "snapshot":
 		return streamSnapshot, true
 	case "candle":
@@ -85,45 +85,46 @@ type outFrame interface {
 // the publisher at build time — the writer and seed-build goroutines
 // both read MarketSnapshot.Phase (atomic.Int32-backed as of Stage 5).
 type snapshotFrame struct {
-	instrument contract.InstrumentID
-	snap       *InstSnap
-	phase      SessionPhase
+	instrument     contract.InstrumentID
+	instrumentSnap *InstSnap
+	phase          SessionPhase
 }
 
-func (f snapshotFrame) marshal(_ *time.Location) ([]byte, error) {
+func (frame snapshotFrame) marshal(_ *time.Location) ([]byte, error) {
 	// Compute change_pct — the ONE float on the wire. Zero when the
 	// session base isn't seeded yet (HasOpen=false) OR when SessionOpen
 	// is 0 (defensive against div-by-zero if the exchange ever reports
 	// a 0 open price).
 	var changePct float64
-	if f.snap.HasOpen && f.snap.SessionOpen != 0 {
-		changePct = float64(f.snap.LastPrice-f.snap.SessionOpen) / float64(f.snap.SessionOpen) * 100.0
+	if frame.instrumentSnap.HasOpen && frame.instrumentSnap.SessionOpen != 0 {
+		changePct = float64(frame.instrumentSnap.LastPrice-frame.instrumentSnap.SessionOpen) /
+			float64(frame.instrumentSnap.SessionOpen) * 100.0
 	}
 
-	bids := make([]wsDepthLevel, len(f.snap.Depth.Bids))
-	for index, bid := range f.snap.Depth.Bids {
+	bids := make([]wsDepthLevel, len(frame.instrumentSnap.Depth.Bids))
+	for index, bid := range frame.instrumentSnap.Depth.Bids {
 		bids[index] = wsDepthLevel{Price: int64(bid.Price), Qty: int64(bid.TotalQty)}
 	}
-	asks := make([]wsDepthLevel, len(f.snap.Depth.Asks))
-	for index, ask := range f.snap.Depth.Asks {
+	asks := make([]wsDepthLevel, len(frame.instrumentSnap.Depth.Asks))
+	for index, ask := range frame.instrumentSnap.Depth.Asks {
 		asks[index] = wsDepthLevel{Price: int64(ask.Price), Qty: int64(ask.TotalQty)}
 	}
 
 	return json.Marshal(wsSnapshotFrame{
 		Type:       "snapshot",
-		Instrument: string(f.instrument),
+		Instrument: string(frame.instrument),
 		Data: wsSnapshotData{
-			Phase:     f.phase.String(),
-			LastPrice: int64(f.snap.LastPrice),
-			HasLast:   f.snap.HasLast,
+			Phase:     frame.phase.String(),
+			LastPrice: int64(frame.instrumentSnap.LastPrice),
+			HasLast:   frame.instrumentSnap.HasLast,
 			ChangePct: changePct,
 			Quote: wsQuote{
-				BestBid: int64(f.snap.Quote.BestBid),
-				BidQty:  int64(f.snap.Quote.BidQty),
-				HasBid:  f.snap.Quote.HasBid,
-				BestAsk: int64(f.snap.Quote.BestAsk),
-				AskQty:  int64(f.snap.Quote.AskQty),
-				HasAsk:  f.snap.Quote.HasAsk,
+				BestBid: int64(frame.instrumentSnap.Quote.BestBid),
+				BidQty:  int64(frame.instrumentSnap.Quote.BidQty),
+				HasBid:  frame.instrumentSnap.Quote.HasBid,
+				BestAsk: int64(frame.instrumentSnap.Quote.BestAsk),
+				AskQty:  int64(frame.instrumentSnap.Quote.AskQty),
+				HasAsk:  frame.instrumentSnap.Quote.HasAsk,
 			},
 			Depth: wsDepth{Bids: bids, Asks: asks},
 		},
@@ -133,23 +134,23 @@ func (f snapshotFrame) marshal(_ *time.Location) ([]byte, error) {
 // candleFrame is one finalized bar push (model-A: finalized bars only;
 // intra-bar live movement rides the snapshot's last_price).
 type candleFrame struct {
-	bar Candle
-	tf  Timeframe
+	bar       Candle
+	timeframe Timeframe
 }
 
-func (f candleFrame) marshal(location *time.Location) ([]byte, error) {
+func (frame candleFrame) marshal(location *time.Location) ([]byte, error) {
 	return json.Marshal(wsCandleFrame{
 		Type:       "candle",
-		Instrument: string(f.bar.Instrument),
-		Timeframe:  timeframeString(f.tf),
+		Instrument: string(frame.bar.Instrument),
+		Timeframe:  timeframeString(frame.timeframe),
 		Bar: BarDTO{
-			Start:  f.bar.Start.In(location).Format(naiveLocalLayout),
-			End:    f.bar.End.In(location).Format(naiveLocalLayout),
-			Open:   int64(f.bar.Open),
-			High:   int64(f.bar.High),
-			Low:    int64(f.bar.Low),
-			Close:  int64(f.bar.Close),
-			Volume: int64(f.bar.Volume),
+			Start:  frame.bar.Start.In(location).Format(naiveLocalLayout),
+			End:    frame.bar.End.In(location).Format(naiveLocalLayout),
+			Open:   int64(frame.bar.Open),
+			High:   int64(frame.bar.High),
+			Low:    int64(frame.bar.Low),
+			Close:  int64(frame.bar.Close),
+			Volume: int64(frame.bar.Volume),
 		},
 	})
 }
@@ -161,8 +162,8 @@ type ackFrame struct {
 	results []wsAckResult
 }
 
-func (f ackFrame) marshal(_ *time.Location) ([]byte, error) {
-	return json.Marshal(wsAckFrame{Type: "ack", Results: f.results})
+func (frame ackFrame) marshal(_ *time.Location) ([]byte, error) {
+	return json.Marshal(wsAckFrame{Type: "ack", Results: frame.results})
 }
 
 // connectedFrame is the first frame the server sends on every new
@@ -173,8 +174,8 @@ type connectedFrame struct {
 	timezone string
 }
 
-func (f connectedFrame) marshal(_ *time.Location) ([]byte, error) {
-	return json.Marshal(wsConnectedFrame{Type: "connected", Market: f.market, Timezone: f.timezone})
+func (frame connectedFrame) marshal(_ *time.Location) ([]byte, error) {
+	return json.Marshal(wsConnectedFrame{Type: "connected", Market: frame.market, Timezone: frame.timezone})
 }
 
 // --- Conn -------------------------------------------------------------
@@ -208,13 +209,13 @@ func NewConn(socket *websocket.Conn, bufferSize int) *Conn {
 // Returns true if queued, false if dropped. Callers may ignore the
 // return (both Publish and the join-seed do — the lag counter is the
 // signal, not the per-call result).
-func (c *Conn) Enqueue(frame outFrame) bool {
+func (conn *Conn) Enqueue(frame outFrame) bool {
 	select {
-	case c.outbound <- frame:
-		c.laggedCount.Store(0)
+	case conn.outbound <- frame:
+		conn.laggedCount.Store(0)
 		return true
 	default:
-		c.laggedCount.Add(1)
+		conn.laggedCount.Add(1)
 		return false
 	}
 }
@@ -234,44 +235,44 @@ func (c *Conn) Enqueue(frame outFrame) bool {
 //
 // Zero value is NOT usable — construct via NewFanOut.
 type FanOut struct {
-	mu       sync.RWMutex
-	subs     map[subKey]map[*Conn]struct{}
-	byConn   map[*Conn][]subKey // reverse index → O(1) disconnect purge
-	snap     *MarketSnapshot
-	market   string
-	location *time.Location
+	mu             sync.RWMutex
+	subs           map[subKey]map[*Conn]struct{}
+	byConn         map[*Conn][]subKey // reverse index → O(1) disconnect purge
+	marketSnapshot *MarketSnapshot
+	market         string
+	location       *time.Location
 }
 
 // NewFanOut constructs a FanOut bound to one exchange instance's
 // MarketSnapshot. market + location come from the Stage-7 wire-up
 // (WireInstance resolves them from the market registry via tzFor).
-func NewFanOut(snap *MarketSnapshot, market string, location *time.Location) *FanOut {
-	if snap == nil {
+func NewFanOut(marketSnapshot *MarketSnapshot, market string, location *time.Location) *FanOut {
+	if marketSnapshot == nil {
 		panic("broker/marketdata: NewFanOut requires non-nil MarketSnapshot")
 	}
 	if location == nil {
 		panic("broker/marketdata: NewFanOut requires non-nil location")
 	}
 	return &FanOut{
-		subs:     make(map[subKey]map[*Conn]struct{}),
-		byConn:   make(map[*Conn][]subKey),
-		snap:     snap,
-		market:   market,
-		location: location,
+		subs:           make(map[subKey]map[*Conn]struct{}),
+		byConn:         make(map[*Conn][]subKey),
+		marketSnapshot: marketSnapshot,
+		market:         market,
+		location:       location,
 	}
 }
 
 // Market returns the market label (for the WS connected frame + logs).
-func (f *FanOut) Market() string { return f.market }
+func (fanOut *FanOut) Market() string { return fanOut.market }
 
 // Location returns the market tz (for WS wire time formatting).
-func (f *FanOut) Location() *time.Location { return f.location }
+func (fanOut *FanOut) Location() *time.Location { return fanOut.location }
 
 // Snap returns the backing MarketSnapshot — for the WS handler, which
 // needs to call Get for seed-build and Phase for seed-stamp. Internal
 // use only; do not mutate the returned snapshot's state outside the
 // ingestor goroutine.
-func (f *FanOut) Snap() *MarketSnapshot { return f.snap }
+func (fanOut *FanOut) Snap() *MarketSnapshot { return fanOut.marketSnapshot }
 
 // KnownInstrument returns true iff the instrument has appeared on the
 // tape (i.e. MarketSnapshot has a slot for it). Used by the WS handler
@@ -280,26 +281,26 @@ func (f *FanOut) Snap() *MarketSnapshot { return f.snap }
 // Race window: a client that subscribes before the first tape event
 // for an instrument sees "unknown instrument" nack. In practice L7
 // delays client bindings until the first ticks have flowed.
-func (f *FanOut) KnownInstrument(instrument contract.InstrumentID) bool {
-	return f.snap.Get(instrument) != nil
+func (fanOut *FanOut) KnownInstrument(instrument contract.InstrumentID) bool {
+	return fanOut.marketSnapshot.Get(instrument) != nil
 }
 
 // PublishSnapshot routes one snapshot frame to every subscriber of
 // (streamSnapshot, instrument, 0). Non-blocking per Conn — full
 // buffers drop + bump lag (BODIES §3.2).
-func (f *FanOut) PublishSnapshot(instrument contract.InstrumentID, snap *InstSnap, phase SessionPhase) {
-	f.publish(
+func (fanOut *FanOut) PublishSnapshot(instrument contract.InstrumentID, instrumentSnap *InstSnap, phase SessionPhase) {
+	fanOut.publish(
 		subKey{Stream: streamSnapshot, Instrument: instrument},
-		snapshotFrame{instrument: instrument, snap: snap, phase: phase},
+		snapshotFrame{instrument: instrument, instrumentSnap: instrumentSnap, phase: phase},
 	)
 }
 
 // PublishCandle routes one finalized bar to every subscriber of
-// (streamCandle, bar.Instrument, tf).
-func (f *FanOut) PublishCandle(bar Candle, tf Timeframe) {
-	f.publish(
-		subKey{Stream: streamCandle, Instrument: bar.Instrument, TF: tf},
-		candleFrame{bar: bar, tf: tf},
+// (streamCandle, bar.Instrument, timeframe).
+func (fanOut *FanOut) PublishCandle(bar Candle, timeframe Timeframe) {
+	fanOut.publish(
+		subKey{Stream: streamCandle, Instrument: bar.Instrument, TF: timeframe},
+		candleFrame{bar: bar, timeframe: timeframe},
 	)
 }
 
@@ -307,13 +308,13 @@ func (f *FanOut) PublishCandle(bar Candle, tf Timeframe) {
 // non-blocking Enqueue to each. N ingestors across multiple FanOuts
 // run this in parallel (one FanOut has one writer, so RLock is really
 // just "the thing Subscribe/Disconnect wait on").
-func (f *FanOut) publish(key subKey, frame outFrame) {
-	f.mu.RLock()
-	conns := f.subs[key]
-	for conn := range conns {
-		conn.Enqueue(frame)
+func (fanOut *FanOut) publish(key subKey, frame outFrame) {
+	fanOut.mu.RLock()
+	subscribedConns := fanOut.subs[key]
+	for subscribedConn := range subscribedConns {
+		subscribedConn.Enqueue(frame)
 	}
-	f.mu.RUnlock()
+	fanOut.mu.RUnlock()
 }
 
 // Subscribe installs a batch of pre-validated subs under ONE write-
@@ -325,25 +326,25 @@ func (f *FanOut) publish(key subKey, frame outFrame) {
 //
 // All requests are assumed pre-validated by the caller (ws handler
 // does instrument/timeframe/stream validation; FanOut just routes).
-func (f *FanOut) Subscribe(conn *Conn, requests []subRequest) {
-	f.mu.Lock()
-	for _, req := range requests {
-		key := subKey{Stream: req.Stream, Instrument: req.Instrument, TF: req.TF}
-		if f.subs[key] == nil {
-			f.subs[key] = make(map[*Conn]struct{})
+func (fanOut *FanOut) Subscribe(conn *Conn, requests []subRequest) {
+	fanOut.mu.Lock()
+	for _, request := range requests {
+		key := subKey{Stream: request.Stream, Instrument: request.Instrument, TF: request.TF}
+		if fanOut.subs[key] == nil {
+			fanOut.subs[key] = make(map[*Conn]struct{})
 		}
-		f.subs[key][conn] = struct{}{}
-		f.byConn[conn] = append(f.byConn[conn], key)
+		fanOut.subs[key][conn] = struct{}{}
+		fanOut.byConn[conn] = append(fanOut.byConn[conn], key)
 	}
-	f.mu.Unlock()
+	fanOut.mu.Unlock()
 
 	// Seed each snapshot sub (R2). Done outside the lock so a slow
 	// socket queue doesn't block other FanOut writers.
-	for _, req := range requests {
-		if req.Stream != streamSnapshot {
+	for _, request := range requests {
+		if request.Stream != streamSnapshot {
 			continue
 		}
-		instrumentSnap := f.snap.Get(req.Instrument)
+		instrumentSnap := fanOut.marketSnapshot.Get(request.Instrument)
 		if instrumentSnap == nil {
 			// Instrument was validated as known but may have been
 			// learned-and-forgotten between validation and here. In
@@ -352,9 +353,9 @@ func (f *FanOut) Subscribe(conn *Conn, requests []subRequest) {
 			continue
 		}
 		conn.Enqueue(snapshotFrame{
-			instrument: req.Instrument,
-			snap:       instrumentSnap,
-			phase:      f.snap.Phase(),
+			instrument:     request.Instrument,
+			instrumentSnap: instrumentSnap,
+			phase:          fanOut.marketSnapshot.Phase(),
 		})
 	}
 }
@@ -363,22 +364,22 @@ func (f *FanOut) Subscribe(conn *Conn, requests []subRequest) {
 // lock. Idempotent per-sub: an unsubscribe for a sub the client never
 // subscribed to is a silent no-op (WS protocol §2.2 doesn't require
 // nack on this path).
-func (f *FanOut) Unsubscribe(conn *Conn, requests []subRequest) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	for _, req := range requests {
-		key := subKey{Stream: req.Stream, Instrument: req.Instrument, TF: req.TF}
-		if conns, ok := f.subs[key]; ok {
-			delete(conns, conn)
-			if len(conns) == 0 {
-				delete(f.subs, key)
+func (fanOut *FanOut) Unsubscribe(conn *Conn, requests []subRequest) {
+	fanOut.mu.Lock()
+	defer fanOut.mu.Unlock()
+	for _, request := range requests {
+		key := subKey{Stream: request.Stream, Instrument: request.Instrument, TF: request.TF}
+		if subscribedConns, ok := fanOut.subs[key]; ok {
+			delete(subscribedConns, conn)
+			if len(subscribedConns) == 0 {
+				delete(fanOut.subs, key)
 			}
 		}
 		// Prune the one key from byConn[conn]'s slice.
-		if keys, ok := f.byConn[conn]; ok {
-			for index, existing := range keys {
-				if existing == key {
-					f.byConn[conn] = append(keys[:index], keys[index+1:]...)
+		if subscribedKeys, ok := fanOut.byConn[conn]; ok {
+			for index, existingKey := range subscribedKeys {
+				if existingKey == key {
+					fanOut.byConn[conn] = append(subscribedKeys[:index], subscribedKeys[index+1:]...)
 					break
 				}
 			}
@@ -391,25 +392,25 @@ func (f *FanOut) Unsubscribe(conn *Conn, requests []subRequest) {
 // typically both race to Disconnect on error paths).
 //
 // Ordering: take the write-lock → remove from subs/byConn → unlock →
-// close(c.outbound) → close(socket). Once we hold the write-lock, no
-// Publish can see this Conn (via the subs map); any Publish mid-send
-// to this Conn's outbound is holding the RLock and has already
+// close(conn.outbound) → close(socket). Once we hold the write-lock,
+// no Publish can see this Conn (via the subs map); any Publish mid-
+// send to this Conn's outbound is holding the RLock and has already
 // committed its atomic select (success or default-drop) before we
-// acquired the write-lock. So close(c.outbound) after unlock is race-
-// free: no sender remains.
-func (f *FanOut) Disconnect(conn *Conn) {
+// acquired the write-lock. So close(conn.outbound) after unlock is
+// race-free: no sender remains.
+func (fanOut *FanOut) Disconnect(conn *Conn) {
 	if !conn.disconnected.CompareAndSwap(false, true) {
 		return
 	}
-	f.mu.Lock()
-	for _, key := range f.byConn[conn] {
-		delete(f.subs[key], conn)
-		if len(f.subs[key]) == 0 {
-			delete(f.subs, key)
+	fanOut.mu.Lock()
+	for _, key := range fanOut.byConn[conn] {
+		delete(fanOut.subs[key], conn)
+		if len(fanOut.subs[key]) == 0 {
+			delete(fanOut.subs, key)
 		}
 	}
-	delete(f.byConn, conn)
-	f.mu.Unlock()
+	delete(fanOut.byConn, conn)
+	fanOut.mu.Unlock()
 
 	close(conn.outbound)
 	if err := conn.socket.Close(); err != nil {
@@ -419,12 +420,12 @@ func (f *FanOut) Disconnect(conn *Conn) {
 
 // SubscriptionCount returns the total number of (key, conn) pairs
 // currently installed. For tests + ops logging only; not a hot path.
-func (f *FanOut) SubscriptionCount() int {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
+func (fanOut *FanOut) SubscriptionCount() int {
+	fanOut.mu.RLock()
+	defer fanOut.mu.RUnlock()
 	count := 0
-	for _, conns := range f.subs {
-		count += len(conns)
+	for _, subscribedConns := range fanOut.subs {
+		count += len(subscribedConns)
 	}
 	return count
 }

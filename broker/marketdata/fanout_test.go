@@ -179,8 +179,8 @@ func TestPublishCandle_RoutesByTimeframe(t *testing.T) {
 		if !ok {
 			t.Fatalf("frame: got %T, want candleFrame", frame)
 		}
-		if candle.tf != TF5m {
-			t.Errorf("candleFrame.tf: got %d, want %d", candle.tf, TF5m)
+		if candle.timeframe != TF5m {
+			t.Errorf("candleFrame.timeframe: got %d, want %d", candle.timeframe, TF5m)
 		}
 	case <-time.After(100 * time.Millisecond):
 		t.Fatal("timed out")
@@ -261,8 +261,8 @@ func TestSubscribe_SnapshotSub_SeedsCurrentState(t *testing.T) {
 		if !ok {
 			t.Fatalf("seed: got %T, want snapshotFrame", frame)
 		}
-		if seed.snap.LastPrice != 10_050 {
-			t.Errorf("seed LastPrice: got %d, want 10050", seed.snap.LastPrice)
+		if seed.instrumentSnap.LastPrice != 10_050 {
+			t.Errorf("seed LastPrice: got %d, want 10050", seed.instrumentSnap.LastPrice)
 		}
 		if seed.phase != PhaseOpen {
 			t.Errorf("seed phase: got %d, want PhaseOpen", seed.phase)

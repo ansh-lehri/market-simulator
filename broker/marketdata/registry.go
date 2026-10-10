@@ -59,23 +59,23 @@ func NewCacheRegistry() *CacheRegistry {
 // snapshot) but we don't panic because that would blow up the broker
 // over a benign re-wire.
 //
-// A nil snap IS a programming error — panic (invariant per root
-// CLAUDE.md).
-func (registry *CacheRegistry) Put(exch ExchangeID, snap *MarketSnapshot) {
-	if snap == nil {
+// A nil marketSnapshot IS a programming error — panic (invariant per
+// root CLAUDE.md).
+func (registry *CacheRegistry) Put(exchangeID ExchangeID, marketSnapshot *MarketSnapshot) {
+	if marketSnapshot == nil {
 		panic("broker/marketdata: CacheRegistry.Put requires non-nil MarketSnapshot")
 	}
 	registry.mu.Lock()
-	if _, existed := registry.byExch[exch]; existed {
+	if _, existed := registry.byExch[exchangeID]; existed {
 		slog.Warn("broker/marketdata: CacheRegistry.Put overwriting existing snapshot",
-			"exch", exch,
+			"exch", exchangeID,
 		)
 	}
-	registry.byExch[exch] = snap
+	registry.byExch[exchangeID] = marketSnapshot
 	count := len(registry.byExch)
 	registry.mu.Unlock()
 	slog.Info("broker/marketdata: CacheRegistry registered snapshot",
-		"exch", exch,
+		"exch", exchangeID,
 		"instance_count", count,
 	)
 }
@@ -87,20 +87,20 @@ func (registry *CacheRegistry) Put(exch ExchangeID, snap *MarketSnapshot) {
 // Idempotent: a Remove on an unknown exch is a silent no-op (shutdown
 // ordering doesn't guarantee Put ran — e.g. a Wire that failed between
 // NewExchange and Start).
-func (registry *CacheRegistry) Remove(exch ExchangeID) {
+func (registry *CacheRegistry) Remove(exchangeID ExchangeID) {
 	registry.mu.Lock()
-	_, existed := registry.byExch[exch]
-	delete(registry.byExch, exch)
+	_, existed := registry.byExch[exchangeID]
+	delete(registry.byExch, exchangeID)
 	count := len(registry.byExch)
 	registry.mu.Unlock()
 	if existed {
 		slog.Info("broker/marketdata: CacheRegistry removed snapshot",
-			"exch", exch,
+			"exch", exchangeID,
 			"instance_count", count,
 		)
 	} else {
 		slog.Debug("broker/marketdata: CacheRegistry.Remove no-op (unknown exch)",
-			"exch", exch,
+			"exch", exchangeID,
 		)
 	}
 }
@@ -116,28 +116,28 @@ func (registry *CacheRegistry) Remove(exch ExchangeID) {
 // Returns (0, false) on any miss. The account path's semantic on miss
 // (funnel/mkt_cache.go doc): market-buy place rejects with
 // ReasonNoMarketPrice; limit orders don't call BestAsk.
-func (registry *CacheRegistry) BestAsk(exch ExchangeID, instrument contract.InstrumentID) (contract.Ticks, bool) {
+func (registry *CacheRegistry) BestAsk(exchangeID ExchangeID, instrument contract.InstrumentID) (contract.Ticks, bool) {
 	registry.mu.RLock()
-	snap, ok := registry.byExch[exch]
+	candidateSnapshot, ok := registry.byExch[exchangeID]
 	registry.mu.RUnlock()
 	if !ok {
 		return 0, false
 	}
-	return snap.BestAsk(instrument)
+	return candidateSnapshot.BestAsk(instrument)
 }
 
 // LastPrice implements the "last price" half of funnel.MarketPriceCache.
 // Same miss shape as BestAsk (unknown exch / unknown instrument /
 // HasLast=false). On miss the account side's A9/A14 position mark
 // degrades to MarkAvailable:false; the position row still ships.
-func (registry *CacheRegistry) LastPrice(exch ExchangeID, instrument contract.InstrumentID) (contract.Ticks, bool) {
+func (registry *CacheRegistry) LastPrice(exchangeID ExchangeID, instrument contract.InstrumentID) (contract.Ticks, bool) {
 	registry.mu.RLock()
-	snap, ok := registry.byExch[exch]
+	candidateSnapshot, ok := registry.byExch[exchangeID]
 	registry.mu.RUnlock()
 	if !ok {
 		return 0, false
 	}
-	return snap.LastPrice(instrument)
+	return candidateSnapshot.LastPrice(instrument)
 }
 
 // InstanceCount returns the number of currently-registered exchange

@@ -134,17 +134,17 @@ type MarketSnapshot struct {
 // first SetX / ApplySession call learns instruments as they appear on
 // the tape (E3).
 //
-// exch is used for boundary slog lines and, via the Stage-6 cache
-// registry, as the key the account side will look this snapshot up
-// under.
-func NewMarketSnapshot(exch ExchangeID) *MarketSnapshot {
-	snap := &MarketSnapshot{exch: exch}
+// exchangeID is used for boundary slog lines and, via the Stage-6
+// cache registry, as the key the account side will look this snapshot
+// up under.
+func NewMarketSnapshot(exchangeID ExchangeID) *MarketSnapshot {
+	marketSnapshot := &MarketSnapshot{exch: exchangeID}
 	// phase atomic.Int32 zero-value == 0 == PhaseUnknown; no explicit
 	// Store needed, left here as documentation of initial state.
-	initial := make(instMap)
-	snap.inst.Store(&initial)
-	slog.Info("broker/marketdata: MarketSnapshot built", "exch", exch)
-	return snap
+	initialInstrumentMap := make(instMap)
+	marketSnapshot.inst.Store(&initialInstrumentMap)
+	slog.Info("broker/marketdata: MarketSnapshot built", "exch", exchangeID)
+	return marketSnapshot
 }
 
 // --- Writer API (ingestor goroutine only) -----------------------------
@@ -156,13 +156,13 @@ func NewMarketSnapshot(exch ExchangeID) *MarketSnapshot {
 // SetLast updates lastPrice for an instrument and, if this is the
 // first trade after a SessionOpened in open phase, seeds sessionOpen
 // as the day-change base (BODIES §2.3).
-func (snap *MarketSnapshot) SetLast(instrument contract.InstrumentID, price contract.Ticks) {
-	slot := snap.getOrCreateSlot(instrument)
+func (marketSnapshot *MarketSnapshot) SetLast(instrument contract.InstrumentID, price contract.Ticks) {
+	slot := marketSnapshot.getOrCreateSlot(instrument)
 	current := slot.Load()
 	newSnap := *current // value copy; shares Depth slice ref with current
 	newSnap.LastPrice = price
 	newSnap.HasLast = true
-	if SessionPhase(snap.phase.Load()) == PhaseOpen && !newSnap.HasOpen {
+	if SessionPhase(marketSnapshot.phase.Load()) == PhaseOpen && !newSnap.HasOpen {
 		newSnap.SessionOpen = price
 		newSnap.HasOpen = true
 	}
@@ -172,8 +172,8 @@ func (snap *MarketSnapshot) SetLast(instrument contract.InstrumentID, price cont
 // SetQuote replaces the quote (best bid/ask + sizes + Has* flags) for
 // an instrument. QuoteState is a value type — the whole thing is
 // copied into the new InstSnap.
-func (snap *MarketSnapshot) SetQuote(instrument contract.InstrumentID, quote book.QuoteState) {
-	slot := snap.getOrCreateSlot(instrument)
+func (marketSnapshot *MarketSnapshot) SetQuote(instrument contract.InstrumentID, quote book.QuoteState) {
+	slot := marketSnapshot.getOrCreateSlot(instrument)
 	current := slot.Load()
 	newSnap := *current
 	newSnap.Quote = quote
@@ -185,8 +185,8 @@ func (snap *MarketSnapshot) SetQuote(instrument contract.InstrumentID, quote boo
 // slice refs on the new InstSnap. Since this InstSnap is never mutated
 // after Store, and the exchange never mutates the slice after emitting
 // it, there is no torn-read window on Depth.
-func (snap *MarketSnapshot) SetDepth(instrument contract.InstrumentID, depth emit.DepthSnapshot) {
-	slot := snap.getOrCreateSlot(instrument)
+func (marketSnapshot *MarketSnapshot) SetDepth(instrument contract.InstrumentID, depth emit.DepthSnapshot) {
+	slot := marketSnapshot.getOrCreateSlot(instrument)
 	current := slot.Load()
 	newSnap := *current
 	newSnap.Depth = depth
@@ -201,15 +201,15 @@ func (snap *MarketSnapshot) SetDepth(instrument contract.InstrumentID, depth emi
 // SessionClosed does NOT clear SessionOpen — the WS payload may still
 // want the closed session's open-price (client decides what to show
 // post-close).
-func (snap *MarketSnapshot) ApplySession(kind emit.SessionEventKind) {
-	snap.phase.Store(int32(mapSessionKindToPhase(kind)))
+func (marketSnapshot *MarketSnapshot) ApplySession(kind emit.SessionEventKind) {
+	marketSnapshot.phase.Store(int32(mapSessionKindToPhase(kind)))
 	if kind != emit.SessionOpened {
 		return
 	}
 	// Reset per-instrument day base so the first trade after open
 	// seeds sessionOpen afresh. Iterating existing slots: no
 	// copy-on-insert triggers, so the loaded map pointer stays valid.
-	m := snap.inst.Load()
+	m := marketSnapshot.inst.Load()
 	for _, slot := range *m {
 		current := slot.Load()
 		newSnap := *current
@@ -229,8 +229,8 @@ func (snap *MarketSnapshot) ApplySession(kind emit.SessionEventKind) {
 // (0,false) when the quote has no ask side (empty ask book, or the
 // instrument hasn't been seen on the tape). Satisfies the "best ask"
 // half of funnel.MarketPriceCache via the Stage-6 registry wrapper.
-func (snap *MarketSnapshot) BestAsk(instrument contract.InstrumentID) (contract.Ticks, bool) {
-	m := snap.inst.Load()
+func (marketSnapshot *MarketSnapshot) BestAsk(instrument contract.InstrumentID) (contract.Ticks, bool) {
+	m := marketSnapshot.inst.Load()
 	slot, ok := (*m)[instrument]
 	if !ok {
 		return 0, false
@@ -246,8 +246,8 @@ func (snap *MarketSnapshot) BestAsk(instrument contract.InstrumentID) (contract.
 // (0,false) when no trade has been seen (cold start, or the instrument
 // hasn't traded this session). Satisfies the "last price" half of
 // funnel.MarketPriceCache.
-func (snap *MarketSnapshot) LastPrice(instrument contract.InstrumentID) (contract.Ticks, bool) {
-	m := snap.inst.Load()
+func (marketSnapshot *MarketSnapshot) LastPrice(instrument contract.InstrumentID) (contract.Ticks, bool) {
+	m := marketSnapshot.inst.Load()
 	slot, ok := (*m)[instrument]
 	if !ok {
 		return 0, false
@@ -266,8 +266,8 @@ func (snap *MarketSnapshot) LastPrice(instrument contract.InstrumentID) (contrac
 //
 // Returned pointer is immutable — callers MUST NOT mutate any field or
 // append to Depth.Bids / Depth.Asks.
-func (snap *MarketSnapshot) Get(instrument contract.InstrumentID) *InstSnap {
-	m := snap.inst.Load()
+func (marketSnapshot *MarketSnapshot) Get(instrument contract.InstrumentID) *InstSnap {
+	m := marketSnapshot.inst.Load()
 	slot, ok := (*m)[instrument]
 	if !ok {
 		return nil
@@ -281,14 +281,14 @@ func (snap *MarketSnapshot) Get(instrument contract.InstrumentID) *InstSnap {
 // reader lands, it gets its own atomic then"). Stage 5's WS layer is
 // that reader (writeLoop + the Subscribe seed-build path), so phase
 // was promoted to atomic.Int32.
-func (snap *MarketSnapshot) Phase() SessionPhase {
-	return SessionPhase(snap.phase.Load())
+func (marketSnapshot *MarketSnapshot) Phase() SessionPhase {
+	return SessionPhase(marketSnapshot.phase.Load())
 }
 
 // Exch returns this snapshot's instance id. For logs + the Stage-6
 // cache registry key.
-func (snap *MarketSnapshot) Exch() ExchangeID {
-	return snap.exch
+func (marketSnapshot *MarketSnapshot) Exch() ExchangeID {
+	return marketSnapshot.exch
 }
 
 // --- internals --------------------------------------------------------
@@ -300,8 +300,8 @@ func (snap *MarketSnapshot) Exch() ExchangeID {
 //
 // The fresh slot is pre-seeded with a non-nil *InstSnap (zero-value)
 // so a reader that Loads it never nil-derefs.
-func (snap *MarketSnapshot) getOrCreateSlot(instrument contract.InstrumentID) *atomic.Pointer[InstSnap] {
-	m := snap.inst.Load()
+func (marketSnapshot *MarketSnapshot) getOrCreateSlot(instrument contract.InstrumentID) *atomic.Pointer[InstSnap] {
+	m := marketSnapshot.inst.Load()
 	if slot, ok := (*m)[instrument]; ok {
 		return slot
 	}
@@ -313,9 +313,9 @@ func (snap *MarketSnapshot) getOrCreateSlot(instrument contract.InstrumentID) *a
 	freshSlot := &atomic.Pointer[InstSnap]{}
 	freshSlot.Store(&InstSnap{}) // non-nil initial so readers never nil-deref
 	newMap[instrument] = freshSlot
-	snap.inst.Store(&newMap)
+	marketSnapshot.inst.Store(&newMap)
 	slog.Debug("broker/marketdata: MarketSnapshot learned instrument",
-		"exch", snap.exch,
+		"exch", marketSnapshot.exch,
 		"instrument", instrument,
 		"instruments_now", len(newMap),
 	)
