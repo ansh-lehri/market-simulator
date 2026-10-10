@@ -114,15 +114,18 @@ type instMap map[contract.InstrumentID]*atomic.Pointer[InstSnap]
 // Instruments are tape-learned (E3 — L7 provides no instrument list),
 // so the map grows at runtime via copy-on-insert.
 //
-// The phase field is INSTANCE-WIDE (the exchange clock is global) and
-// is a plain writer-only field — safe to read ONLY from the writer
-// goroutine (BODIES §2.5). sessionOpen stays per-instrument (reset
-// across all instruments on SessionOpened).
+// The phase field is INSTANCE-WIDE (the exchange clock is global). In
+// Stage 4 it was a plain writer-only field (BODIES §2.5: "if a cross-
+// goroutine reader lands, it gets its own atomic then"). Stage 5's WS
+// layer is that cross-goroutine reader (writeLoop + Subscribe's
+// seed-build path), so phase was promoted to atomic.Int32 here.
+// sessionOpen stays per-instrument (reset across all instruments on
+// SessionOpened).
 //
 // Zero value is NOT usable — construct via NewMarketSnapshot.
 type MarketSnapshot struct {
 	exch  ExchangeID
-	phase SessionPhase
+	phase atomic.Int32 // holds SessionPhase; promoted to atomic in Stage 5 for cross-goroutine reads (BODIES §2.5)
 	inst  atomic.Pointer[instMap]
 }
 
@@ -135,7 +138,9 @@ type MarketSnapshot struct {
 // registry, as the key the account side will look this snapshot up
 // under.
 func NewMarketSnapshot(exch ExchangeID) *MarketSnapshot {
-	snap := &MarketSnapshot{exch: exch, phase: PhaseUnknown}
+	snap := &MarketSnapshot{exch: exch}
+	// phase atomic.Int32 zero-value == 0 == PhaseUnknown; no explicit
+	// Store needed, left here as documentation of initial state.
 	initial := make(instMap)
 	snap.inst.Store(&initial)
 	slog.Info("broker/marketdata: MarketSnapshot built", "exch", exch)
@@ -157,7 +162,7 @@ func (snap *MarketSnapshot) SetLast(instrument contract.InstrumentID, price cont
 	newSnap := *current // value copy; shares Depth slice ref with current
 	newSnap.LastPrice = price
 	newSnap.HasLast = true
-	if snap.phase == PhaseOpen && !newSnap.HasOpen {
+	if SessionPhase(snap.phase.Load()) == PhaseOpen && !newSnap.HasOpen {
 		newSnap.SessionOpen = price
 		newSnap.HasOpen = true
 	}
@@ -197,7 +202,7 @@ func (snap *MarketSnapshot) SetDepth(instrument contract.InstrumentID, depth emi
 // want the closed session's open-price (client decides what to show
 // post-close).
 func (snap *MarketSnapshot) ApplySession(kind emit.SessionEventKind) {
-	snap.phase = mapSessionKindToPhase(kind)
+	snap.phase.Store(int32(mapSessionKindToPhase(kind)))
 	if kind != emit.SessionOpened {
 		return
 	}
@@ -270,13 +275,14 @@ func (snap *MarketSnapshot) Get(instrument contract.InstrumentID) *InstSnap {
 	return slot.Load()
 }
 
-// Phase returns the current instance-wide session phase. SAFE ONLY
-// from the writer (ingestor) goroutine — see BODIES §2.5. Reading
-// from another goroutine races with ApplySession's write. The WS
-// snapshot publish happens on the ingestor goroutine, so the WS use
-// is race-free in production.
+// Phase returns the current instance-wide session phase. Safe from
+// ANY goroutine — reads via atomic.Int32.Load. phase was a plain
+// writer-only field in Stage 4 (BODIES §2.5: "if a cross-goroutine
+// reader lands, it gets its own atomic then"). Stage 5's WS layer is
+// that reader (writeLoop + the Subscribe seed-build path), so phase
+// was promoted to atomic.Int32.
 func (snap *MarketSnapshot) Phase() SessionPhase {
-	return snap.phase
+	return SessionPhase(snap.phase.Load())
 }
 
 // Exch returns this snapshot's instance id. For logs + the Stage-6
