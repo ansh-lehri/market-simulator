@@ -10,11 +10,11 @@ The broker's public, instrument-keyed, account-free, non-shard market-data axis:
 
 THE BRIDGE (how it fits what's built)
 It is the public-tape sibling of the built runSettlementConsumer (which drains the exchange's private EngineResult stream). Same house pattern: one goroutine per instance, sole channel consumer, slog start/exit, skip-and-log-never-panic, teardown = channel close only.
-It is what finally replaces nopMarketCache: the shared cacheRegistry becomes the real MarketPriceCache injected at NewBroker (today bringup passes nil/nop). This lights up the Phase-5 market-buy price and the Phase-6 A9/A14 marks.
-L7 dependency: WireInstance is called by L7, and the session→FanOut binding is L7's, not this component's. L7 is being rebuilt, so the component-internal parts build now; the live end-to-end attachment waits on L7 (same as the settlement consumer predating its spawner).
+It is what finally replaces nopMarketCache: the shared CacheRegistry (exported type; was pseudo-lowercase in the design doc) is the real MarketPriceCache injected at NewBroker — SHIPPED in Phase 7 (bringup builds marketdata.NewMarketData and passes marketData.MarketPriceCache() to funnel.NewBroker, replacing the Phase-6 nil). This lit up the Phase-5 market-buy price and the Phase-6 A9/A14 marks (once L7 calls WireInstance per instance).
+L7 dependency: WireInstance is called by L7, and the session→FanOut binding is L7's, not this component's. L7 is being rebuilt, so the component-internal parts are built (shipped Phase 7); the live end-to-end attachment waits on L7 (same as the settlement consumer predating its spawner).
 The five pieces (and their cardinality)
 
-Process-lifetime (broker bootstrap): CandleStore, ReadEngine (rollup+range read), the HTTP server (/candles + /ws), and the cacheRegistry (map[ExchangeID]*MarketSnapshot). Per exchange instance (built by WireInstance): ingestor, FanOut, MarketSnapshot.
+Process-lifetime (broker bootstrap): CandleStore, ReadEngine (rollup+range read), the HTTP route /v1/candles (registered by bringup via MarketData.RegisterCandlesRoute), and the CacheRegistry (map[ExchangeID]*MarketSnapshot). The HTTP /v1/ws route is NOT registered at bringup — the per-session FanOut dispatch is L7's seam; L7 will call NewWSHandler(fanOut, cfg) per session once it exists, reaching WSConfig via MarketData.WSConfig(). Per exchange instance (built by WireInstance): ingestor, FanOut, MarketSnapshot.
 
 Load-bearing rules
 Value discipline: raw int64 ticks/qty everywhere; no floats, no unit field on any wire payload (D-3 / P6-D33). The one float on the wire is change_pct on the snapshot push; nothing else.
@@ -28,12 +28,12 @@ MarketSnapshot concurrency = (B) atomic copy-on-write (decided): per-instrument 
 MarketSnapshot is the price source for BestAsk/LastPrice — public-tape sourced, verified (D-17), never private (a private account-scoped stream is silent when you're not trading, but the market price keeps moving). BestAsk miss → market-buy rejects "no market price"; LastPrice miss → A9/A14 mark degrades, position still ships.
 FanOut subKey = {Stream, Instrument, TF} (not keyed by ExchangeID — a FanOut is one-per- instance, so ExchangeID is redundant inside it; it still rides outbound packets + is the cache key). Publish on the ingestor goroutine under RLock, non-blocking (full buffer → drop + flag lagged). Subscribe/Unsubscribe/Disconnect under write-lock (rare). Two goroutines per WS connection (read loop; sole-writer write loop) — concurrent writes to one WS conn are illegal.
 WS (Model A): candle pushes are finalized bars only (1m every minute; 5/30/60m on bucket close); intra-bar live movement rides the snapshot's last_price (the rightmost wick does not grow live — accepted). Snapshot subscribe seeds (quote/depth are change-only); candle subscribe does NOT seed (history via GET /candles) (R1/R2). Session folds into the snapshot via phase — no separate session frame.
-Teardown: the ingestor's for range exits when the exchange closes Public on Stop(); on exit it must cacheRegistry.remove(exch) (the snapshot lives in a shared registry; self-GC won't remove that entry → the account side would read a dead snapshot).
+Teardown: the ingestor's for range exits when the exchange closes Public on Stop(); on exit it must CacheRegistry.Remove(exchangeID) (the snapshot lives in a shared registry; self-GC won't remove that entry → the account side would read a dead snapshot).
 Deps & seam
 exchange/emit (TapeEvent, the 5 kinds, Candle, DepthSnapshot), exchange/book (QuoteState), exchange/wire (Exchange.Public, Stop() closes it), contract (InstrumentID/Ticks/Qty).
 connectivity/db (*pgxpool.Pool — pgx, not database/sql). broker/store is the pgx/durable-read convention reference; broker/order/http.go the HTTP handler convention reference; broker/reads/CLAUDE.md the durable-read status rules.
-broker/funnel/mkt_cache.go — the real MarketPriceCache interface keyed (ExchangeID, InstrumentID) that the cacheRegistry implements. Code wins: this supersedes the Phase-6 doc's instrument-only MarketDataCache.
-Edits outside the package: bringup builds the shared pieces + injects the cacheRegistry as the MarketPriceCache into NewBroker (replacing nil/nop) + registers the two routes; a new 0004 migration adds the candles table.
+broker/funnel/mkt_cache.go — the real MarketPriceCache interface keyed (ExchangeID, InstrumentID) that CacheRegistry satisfies STRUCTURALLY (this package does NOT import broker/funnel — keeps marketdata self-contained for a potential future service split; interface check lands at bringup's funnel.NewBroker call site). Code wins: this supersedes the Phase-6 doc's instrument-only MarketDataCache.
+Edits outside the package (SHIPPED Phase 7): bringup builds marketdata.NewMarketData (CandleStore borrowed from brokerStore.Pool(), ReadEngine, CacheRegistry) + passes marketData.MarketPriceCache() to funnel.NewBroker as mktCache (replacing nil) + registers /v1/candles on buildMux; six Phase-7 tunables added to BrokerConfig (CandleReadTimeout, WSConnBuffer, WSLagEvictionThreshold, WSPingInterval, WSReadTimeout, WSWriteTimeout); Runtime.Market exposed so L7 can call WireInstance. The 0004 candles migration ships too.
 Do NOT
 persist anything but 1-min OHLCV (higher timeframes are rolled on read, never stored); persist on-demand candles; add a unit/currency field or a float anywhere but change_pct;
 do tz conversion at insert (store the instant; convert only at the read edge); bucket-align in UTC (align in market-local tz);
@@ -42,12 +42,13 @@ drain Exchange.Public anywhere but the ingestor (sole consumer); build the formi
 mutate a published instSnap in place (CoW — build a new one); key subKey by ExchangeID;
 write to a WS conn from anywhere but its one write goroutine;
 design the session→FanOut binding or who calls WireInstance (that's L7's).
-Flags (surface in orientation, don't silently resolve)
-WS library is the one unlocked build pick (gorilla/websocket leaned) and would be the first WS dependency in go.mod — confirm before adding.
-cacheRegistry → NewBroker is a cross-package edit (bringup + the MarketPriceCache injection, replacing nop). Flag the real mkt_cache.go signature vs the stale Phase-6 MarketDataCache name.
-L7-driven live attachment is out of buildable scope until L7 exists — WireInstance's body builds now; who calls it + the session→FanOut binding is L7's.
-The candles migration (0004) and the market→IANA registry as code don't exist yet — both are new files this phase authors.
-The B5 stop-watcher feed (this component is B10 "tape relay & fan-out" in the tracker, meant to also feed a stop-watcher) has no consumer today (B5 not started) — a seam to add later, not now.
+Status (as of Phase 7 ship — Oct 2026)
+RESOLVED: WS library picked (gorilla/websocket v1.5.3, first WS dep in go.mod); CacheRegistry → NewBroker wire-in SHIPPED (bringup passes marketData.MarketPriceCache(), not nil); migration 0004 candles table SHIPPED; market→IANA registry SHIPPED in timezone.go (IN→Asia/Kolkata, US→America/New_York); phase atomic.Int32 promotion SHIPPED in Stage 5 (BODIES §2.5 reserved it for exactly the WS cross-goroutine reader that landed).
+STILL PARKED (correctly, out of this component's scope):
+L7-driven live attachment — WireInstance's body is built + exercised by tests via fake tapes, but WHO calls it (canonical daily timer / on-demand join) and the session→FanOut binding store are L7's seam, waiting on L7 to be rebuilt.
+/v1/ws route registration is deferred to L7 for the same reason: the per-session FanOut dispatch is L7's. Phase 7 pins the no-WS-at-bringup posture via TestBringUp_Mux_DoesNotRegisterWSYet so a future stub registration breaks loudly. WSConfig is held on MarketData so L7 can read it when the time comes.
+B5 stop-watcher feed (this component is B10 "tape relay & fan-out" in the tracker, meant to also feed a stop-watcher) has no consumer today (B5 not started) — a seam to add later, not now.
+Doc drifts observed during Phase 7 are captured in [[project_phase7_marketdata_drifts]] (memory) — exported CacheRegistry vs doc's lowercase; /v1/ws deferred vs the wiring doc's "register at bringup" list; subKey without ExchangeID per BODIES §3.0 [CORRECTS] vs base IMPL doc; others.
 Tests — objective, no goldens-first, no auditor
 
 Nothing here implements a money formula — it's storage, a deterministic fold, channel routing, and transport. Normal integration/table tests, assertions trace to the docs:
