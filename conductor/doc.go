@@ -20,8 +20,7 @@
 //     (EnsureAccount, StartSession, WireInstance, exch.Start/Stop) or
 //     a WebSocket ServeHTTP delegate.
 //   - Unbuilt-seam rule: BrokerPort lists only shipped funnel methods
-//     (EnsureAccount, StartSession, QualifyOnDemand); each later phase
-//     grows the port as it builds the broker seam it needs — the
-//     canonical bring-up phase adds WireInstance, the teardown phases
-//     add EndSession and FinalizeMarket.
+//     (EnsureAccount, StartSession, QualifyOnDemand, WireInstance); each
+//     later phase grows the port as it builds the broker seam it needs
+//     — the teardown phases will add EndSession and FinalizeMarket.
 package conductor
