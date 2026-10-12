@@ -3,6 +3,7 @@ package conductor
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -44,18 +45,24 @@ func (row fakeCandleRow) Scan(dest ...any) error {
 // configured row on QueryRow. The recording surface lets tests assert
 // the reference lookup used the market tag (not the per-instance id)
 // and the configured instrument id.
+//
+// recordLock guards the recording fields so a shared reader can be used
+// across concurrent spin-ups without racing on the recorder.
 type fakeCandleReader struct {
 	returnRow pgx.Row
 
-	lastSQL  string
-	lastArgs []any
-	calls    int
+	recordLock sync.Mutex
+	lastSQL    string
+	lastArgs   []any
+	calls      int
 }
 
 func (reader *fakeCandleReader) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
+	reader.recordLock.Lock()
 	reader.calls++
 	reader.lastSQL = sql
 	reader.lastArgs = args
+	reader.recordLock.Unlock()
 	return reader.returnRow
 }
 
