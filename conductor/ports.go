@@ -14,19 +14,24 @@ import (
 
 // BrokerPort lists ONLY the shipped funnel.Broker methods — the
 // unbuilt-seam rule from conductor/CLAUDE.md. Later phases grow this:
-//   - The canonical bring-up phase adds
-//     WireInstance(exchangeID string, private <-chan contract.EngineResult)
-//     when it ships that broker-side method.
-//   - The canonical and on-demand teardown phases add
-//     EndSession(SessionEndCmd) and FinalizeMarket(exchangeID) when
-//     they ship.
+//   - The teardown phases add EndSession(SessionEndCmd) and
+//     FinalizeMarket(exchangeID) when they ship.
 //
 // Never list an unbuilt method here — the compile-time assertion below
 // would fail.
+//
+// WireInstance attaches this broker to one exchange instance's private
+// result stream, spawning the settlement consumer that drains it. One
+// call per constructed exchange instance, invoked just before the
+// exchange is started so the consumer is already parked when the first
+// result lands. Non-blocking: returns as soon as the consumer goroutine
+// is spawned. exchangeID is logging-only; routing is driven by the
+// AccountID encoded on each EngineResult's OrderID.
 type BrokerPort interface {
 	EnsureAccount(ctx context.Context, ownerType lifecycle.OwnerType, ownerID string) (funnel.AccountID, error)
 	StartSession(ctx context.Context, cmd funnel.SessionStartCmd) error
 	QualifyOnDemand(ctx context.Context, accountID funnel.AccountID) (bool, error)
+	WireInstance(exchangeID string, privateStream <-chan contract.EngineResult)
 }
 
 // MarketDataPort is the market-data holder's conductor-facing surface
