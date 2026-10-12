@@ -201,14 +201,15 @@ func TestConductor_StartStop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewConductor: %v", err)
 	}
-	cd.Start()
+	// cfgDir is an empty t.TempDir() — Start lists zero tags and spawns
+	// zero timers, which is valid.
+	if startErr := cd.Start(); startErr != nil {
+		t.Fatalf("Start on empty cfgDir: %v", startErr)
+	}
 	if cd.timerQuit == nil {
 		t.Error("Start did not allocate timerQuit")
 	}
 	cd.Stop()
-	if cd.timerQuit != nil {
-		t.Error("Stop did not clear timerQuit")
-	}
-	// Second Stop is a no-op.
+	// Second Stop must be a no-op (idempotent via stopOnce).
 	cd.Stop()
 }

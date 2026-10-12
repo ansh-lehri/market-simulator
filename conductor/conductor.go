@@ -62,6 +62,13 @@ type Config struct {
 	// call made during canonical market bring-up. Zero →
 	// DefaultBringUpTimeout.
 	BringUpTimeout time.Duration
+
+	// BadConfigRetryDelay is how long each per-market timer sleeps
+	// between retries when its config fails to load or compute a next
+	// fire time. Zero → DefaultBadConfigRetryDelay (one hour) — long
+	// so a persistent config error never spins the loop. Tests set a
+	// small value.
+	BadConfigRetryDelay time.Duration
 }
 
 // Conductor is this package's top-level object — holds the registry,
@@ -69,19 +76,21 @@ type Config struct {
 // reserved for the canonical bring-up phase's per-market timers. Zero
 // value is NOT usable; construct via NewConductor.
 type Conductor struct {
-	reg            *Registry
-	cfgDir         string
-	ohlcv          *pgxpool.Pool
-	referenceReader candleReader // defaults to ohlcv; test seam for in-package tests only
-	wsCfg          marketdata.WSConfig
-	broker         BrokerPort
-	market         MarketDataPort
-	exch           ExchangeFactory
-	agents         AgentOrchestrator
-	liq            LiquidityOperator
-	now            func() time.Time
-	log            *slog.Logger
-	bringUpTimeout time.Duration
+	reg                 *Registry
+	cfgDir              string
+	ohlcv               *pgxpool.Pool
+	referenceReader     candleReader // defaults to ohlcv; test seam for in-package tests only
+	wsCfg               marketdata.WSConfig
+	broker              BrokerPort
+	market              MarketDataPort
+	exch                ExchangeFactory
+	agents              AgentOrchestrator
+	liq                 LiquidityOperator
+	now                 func() time.Time
+	log                 *slog.Logger
+	bringUpTimeout      time.Duration
+	badConfigRetryDelay time.Duration
+	stopOnce            sync.Once
 
 	// Timer-lifecycle fields reserved for the canonical bring-up phase
 	// — one per-market timer goroutine fires market-open minus the
@@ -132,55 +141,93 @@ func NewConductor(cfg Config) (*Conductor, error) {
 	if bringUpTimeout == 0 {
 		bringUpTimeout = DefaultBringUpTimeout
 	}
+	badConfigRetryDelay := cfg.BadConfigRetryDelay
+	if badConfigRetryDelay == 0 {
+		badConfigRetryDelay = DefaultBadConfigRetryDelay
+	}
 
 	conductor := &Conductor{
-		reg:             newRegistry(),
-		cfgDir:          cfg.CfgDir,
-		ohlcv:           cfg.OHLCVPool,
-		referenceReader: cfg.OHLCVPool, // *pgxpool.Pool satisfies candleReader
-		wsCfg:           cfg.Market.WSConfig(),
-		broker:          cfg.Broker,
-		market:          cfg.Market,
-		exch:            exch,
-		agents:          agents,
-		liq:             liq,
-		now:             now,
-		log:             log,
-		bringUpTimeout:  bringUpTimeout,
+		reg:                 newRegistry(),
+		cfgDir:              cfg.CfgDir,
+		ohlcv:               cfg.OHLCVPool,
+		referenceReader:     cfg.OHLCVPool, // *pgxpool.Pool satisfies candleReader
+		wsCfg:               cfg.Market.WSConfig(),
+		broker:              cfg.Broker,
+		market:              cfg.Market,
+		exch:                exch,
+		agents:              agents,
+		liq:                 liq,
+		now:                 now,
+		log:                 log,
+		bringUpTimeout:      bringUpTimeout,
+		badConfigRetryDelay: badConfigRetryDelay,
 	}
 	log.Info("conductor: constructed",
 		"cfg_dir", cfg.CfgDir,
 		"ws_conn_buffer", conductor.wsCfg.ConnBuffer,
 		"bringup_timeout", conductor.bringUpTimeout,
+		"bad_config_retry_delay", conductor.badConfigRetryDelay,
 	)
 	return conductor, nil
 }
 
-// Start is the lifecycle entry. The scaffold spawns no goroutines
-// (the per-market canonical timers land in the next phase); timerQuit
-// is allocated here so Stop is safe to call in the scaffold.
-func (conductor *Conductor) Start() {
+// Start is the lifecycle entry. It allocates timerQuit, lists every
+// configured market tag under cfgDir, and spawns one per-market timer
+// goroutine for each. Returns an error only if the cfgDir listing
+// itself fails — a wholly empty cfgDir is legal (zero markets, zero
+// timers; a valid configuration for a boot-and-wait process).
+//
+// Each timer goroutine arms itself to the market's next weekday
+// pre-open and fires spinUpCanonical inline. Timers never share state;
+// the Registry mutex serializes any registry mutation.
+func (conductor *Conductor) Start() error {
 	if conductor.timerQuit == nil {
 		conductor.timerQuit = make(chan struct{})
 	}
-	conductor.log.Info("conductor: Start (scaffold — no timer goroutines yet)")
+	tags, listErr := listConfiguredMarkets(conductor.cfgDir)
+	if listErr != nil {
+		return fmt.Errorf("conductor: Start: list configured markets: %w", listErr)
+	}
+	conductor.log.Info("conductor: Start spawning per-market timers",
+		"cfg_dir", conductor.cfgDir,
+		"tag_count", len(tags),
+	)
+	for _, marketTag := range tags {
+		spawnTag := marketTag
+		conductor.wg.Add(1)
+		go conductor.runCanonicalTimer(spawnTag)
+	}
+	return nil
 }
 
-// Stop closes the timer-quit signal, waits for any spawned goroutines
-// (none in the scaffold), and closes the ohlcv pool. Idempotent — a
-// second call is a no-op on the quit channel and pgxpool.Close is
-// itself idempotent.
+// Stop closes the timer-quit signal, waits for every spawned timer to
+// exit (and for any spin-up already in flight inside a timer to
+// complete), then closes the ohlcv pool. Idempotent via stopOnce — a
+// second call is a no-op.
+//
+// The quit channel is closed, NOT nilled, so a timer that re-selects
+// on it after returning from spin-up still receives the shutdown
+// signal rather than blocking on a nil channel.
 func (conductor *Conductor) Stop() {
-	if conductor.timerQuit != nil {
-		close(conductor.timerQuit)
-		conductor.timerQuit = nil
-	}
-	conductor.wg.Wait()
-	if conductor.ohlcv != nil {
-		conductor.ohlcv.Close()
-		conductor.ohlcv = nil
-	}
-	conductor.log.Info("conductor: Stop complete")
+	conductor.stopOnce.Do(func() {
+		if conductor.timerQuit != nil {
+			// Guard against a caller (typically a test) that already
+			// closed timerQuit directly — close-of-closed panics.
+			// The select/default distinguishes "ready" (closed) from
+			// "blocking" (still open) on a signal-only channel.
+			select {
+			case <-conductor.timerQuit:
+				// Already closed; nothing to do.
+			default:
+				close(conductor.timerQuit)
+			}
+		}
+		conductor.wg.Wait()
+		if conductor.ohlcv != nil {
+			conductor.ohlcv.Close()
+		}
+		conductor.log.Info("conductor: Stop complete")
+	})
 }
 
 // MountRoutes registers the conductor's HTTP routes on the shared mux
