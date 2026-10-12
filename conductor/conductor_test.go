@@ -126,9 +126,9 @@ func TestNewConductor_UsesInjectedOverrides(t *testing.T) {
 	fixedTime := time.Date(2026, 10, 12, 9, 15, 0, 0, time.UTC)
 	cfg.Now = func() time.Time { return fixedTime }
 	cfg.Exchange = defaultExchangeFactory{} // explicit; the type-check matters more than the value
-	customAgents := stubAgentOrchestrator{log: nil}
+	customAgents := newStubAgentOrchestrator(nil, 42)
 	cfg.Agents = customAgents
-	customLiq := stubLiquidityOperator{log: nil}
+	customLiq := newStubLiquidityOperator(nil, 42)
 	cfg.Liquidity = customLiq
 
 	cd, err := NewConductor(cfg)
@@ -138,10 +138,10 @@ func TestNewConductor_UsesInjectedOverrides(t *testing.T) {
 	if cd.now() != fixedTime {
 		t.Error("injected Now not used")
 	}
-	if _, ok := cd.agents.(stubAgentOrchestrator); !ok {
+	if _, ok := cd.agents.(*stubAgentOrchestrator); !ok {
 		t.Error("injected Agents not retained")
 	}
-	if _, ok := cd.liq.(stubLiquidityOperator); !ok {
+	if _, ok := cd.liq.(*stubLiquidityOperator); !ok {
 		t.Error("injected Liquidity not retained")
 	}
 }
@@ -167,6 +167,29 @@ func TestNewConductor_RejectsMissingRequiredFields(t *testing.T) {
 				t.Fatal("expected error")
 			}
 		})
+	}
+}
+
+func TestNewConductor_BringUpTimeoutDefaultsAndOverrides(t *testing.T) {
+	pool := newUnconnectedPool(t)
+	defer pool.Close()
+
+	defaultedConductor, err := NewConductor(newTestConfig(t, pool))
+	if err != nil {
+		t.Fatalf("NewConductor default: %v", err)
+	}
+	if defaultedConductor.bringUpTimeout != DefaultBringUpTimeout {
+		t.Errorf("default bringUpTimeout = %v, want %v", defaultedConductor.bringUpTimeout, DefaultBringUpTimeout)
+	}
+
+	overriddenCfg := newTestConfig(t, pool)
+	overriddenCfg.BringUpTimeout = 5 * time.Second
+	overriddenConductor, err := NewConductor(overriddenCfg)
+	if err != nil {
+		t.Fatalf("NewConductor override: %v", err)
+	}
+	if overriddenConductor.bringUpTimeout != 5*time.Second {
+		t.Errorf("overridden bringUpTimeout = %v, want 5s", overriddenConductor.bringUpTimeout)
 	}
 }
 
