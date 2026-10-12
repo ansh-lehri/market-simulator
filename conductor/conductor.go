@@ -12,6 +12,12 @@ import (
 	"simulator/broker/marketdata"
 )
 
+// wsHandlerFactoryFn builds the per-connection WebSocket http.Handler
+// the dispatcher delegates to once sessionID + market have resolved.
+// Production always uses marketdata.NewWSHandler; tests inject fakes to
+// intercept delegation without going through gorilla's real upgrade.
+type wsHandlerFactoryFn func(fanOut *marketdata.FanOut, cfg marketdata.WSConfig) http.Handler
+
 // LivenessPath is the scaffold's only mounted route — a smoke probe
 // that proves the mux handoff from bringup.Runtime.Mux to the conductor
 // works. The /v1/_conductor/ prefix is deliberately underscored so no
@@ -66,6 +72,12 @@ type Config struct {
 	Now       func() time.Time  // nil → time.Now
 	Logger    *slog.Logger      // nil → slog.Default
 
+	// WSHandlerFactory is a test seam that lets a fake http.Handler
+	// intercept WebSocket delegation without routing through gorilla's
+	// real upgrade. Nil → marketdata.NewWSHandler (the shipped WS layer).
+	// Production never overrides.
+	WSHandlerFactory wsHandlerFactoryFn
+
 	// BringUpTimeout bounds the synchronous AgentOrchestrator.BringUp
 	// call made during canonical market bring-up. Zero →
 	// DefaultBringUpTimeout.
@@ -104,6 +116,7 @@ type Conductor struct {
 	bringUpTimeout      time.Duration
 	joinTimeout         time.Duration
 	badConfigRetryDelay time.Duration
+	wsHandlerFactory    wsHandlerFactoryFn
 	stopOnce            sync.Once
 
 	// Timer-lifecycle fields reserved for the canonical bring-up phase
@@ -159,6 +172,10 @@ func NewConductor(cfg Config) (*Conductor, error) {
 	if joinTimeout == 0 {
 		joinTimeout = DefaultJoinTimeout
 	}
+	wsHandlerFactory := cfg.WSHandlerFactory
+	if wsHandlerFactory == nil {
+		wsHandlerFactory = marketdata.NewWSHandler
+	}
 	badConfigRetryDelay := cfg.BadConfigRetryDelay
 	if badConfigRetryDelay == 0 {
 		badConfigRetryDelay = DefaultBadConfigRetryDelay
@@ -180,6 +197,7 @@ func NewConductor(cfg Config) (*Conductor, error) {
 		bringUpTimeout:      bringUpTimeout,
 		joinTimeout:         joinTimeout,
 		badConfigRetryDelay: badConfigRetryDelay,
+		wsHandlerFactory:    wsHandlerFactory,
 	}
 	log.Info("conductor: constructed",
 		"cfg_dir", cfg.CfgDir,
@@ -271,8 +289,10 @@ func (conductor *Conductor) MountRoutes(mux *http.ServeMux) {
 		_, _ = w.Write([]byte("ok"))
 	})
 	mux.HandleFunc(PathSessionCanonical, conductor.handleJoinCanonical)
+	mux.HandleFunc(marketdata.PathWS, conductor.handleWS)
 	conductor.log.Info("conductor: routes mounted",
 		"liveness", LivenessPath,
 		"join_canonical", PathSessionCanonical,
+		"ws", marketdata.PathWS,
 	)
 }

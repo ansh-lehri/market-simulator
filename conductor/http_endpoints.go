@@ -9,6 +9,7 @@ import (
 	"runtime/debug"
 
 	"simulator/broker/funnel"
+	"simulator/broker/marketdata"
 	"simulator/economy/lifecycle"
 )
 
@@ -199,3 +200,97 @@ func (conductor *Conductor) handleJoinCanonical(responseWriter http.ResponseWrit
 		Status:        "active",
 	}, PathSessionCanonical)
 }
+
+// --- GET /v1/ws (dispatcher) ----------------------------------------
+
+// authFromRequest extracts the carrier identifying which session the
+// WebSocket connection belongs to. Today only the ?session= query param
+// is recognized; a longer-lived reconnect token (surviving a browser
+// refresh) is parked for a later phase and lands here as an additional
+// source.
+//
+// Returns the empty string when no carrier is present — the dispatcher
+// writes 401 before any Upgrade (gorilla's Upgrade hijacks the
+// connection, after which the conductor can no longer write a status).
+func authFromRequest(request *http.Request) SessionID {
+	return SessionID(request.URL.Query().Get("session"))
+}
+
+// fanoutForSession is the dispatcher's registry resolve: sessionID →
+// Session.Market → Market.fanout. The one registry mutex is taken for
+// the microsecond map lookups and released BEFORE the fanout is
+// returned — the caller must not hold the mutex across the shipped WS
+// handler's ServeHTTP (which blocks on its write-loop-done signal for
+// the entire connection life; holding the lock across it would freeze
+// every other join and dispatcher resolve for as long as any socket is
+// open).
+//
+// Returns nil when the session doesn't exist, isn't Active (a Starting
+// reservation hasn't finalized yet), is pointing at a market that no
+// longer exists, or is pointing at a market that isn't Live (teardown
+// in flight). The dispatcher writes 404 in each of these cases.
+//
+// Deliberately no defer unlock: the lock→copy→unlock→return sequence
+// is written out so a reader can see directly that unlock precedes
+// return — the load-bearing concurrency property of the whole file.
+func (conductor *Conductor) fanoutForSession(sid SessionID) *marketdata.FanOut {
+	conductor.reg.mu.Lock()
+	session := conductor.reg.sessions[sid]
+	if session == nil || session.State != Active {
+		conductor.reg.mu.Unlock()
+		return nil
+	}
+	market := conductor.reg.markets[session.Market]
+	if market == nil || market.State != Live {
+		conductor.reg.mu.Unlock()
+		return nil
+	}
+	fanout := market.fanout
+	conductor.reg.mu.Unlock()
+	return fanout
+}
+
+// handleWS is the WebSocket dispatcher. Validates the carrier, resolves
+// the session's fanout, and hands the connection off to the shipped WS
+// handler. Both reject branches (401 empty session, 404 unresolvable
+// session) MUST write their status BEFORE the delegate — once gorilla's
+// Upgrade hijacks the connection, the conductor can no longer write an
+// HTTP status.
+//
+// Delegation blocks for the whole connection life (readLoop runs on
+// this goroutine; writeLoop runs on a spawned goroutine; ServeHTTP
+// returns only after both exit). The registry mutex is released inside
+// fanoutForSession, so this blocking does not freeze the registry.
+func (conductor *Conductor) handleWS(responseWriter http.ResponseWriter, request *http.Request) {
+	defer recoverPanic(responseWriter, marketdata.PathWS)
+
+	if request.Method != http.MethodGet {
+		writeError(responseWriter, http.StatusMethodNotAllowed, "method not allowed", marketdata.PathWS)
+		return
+	}
+
+	sessionID := authFromRequest(request)
+	if sessionID == "" {
+		conductor.log.Info("conductor: handleWS rejected — no session carrier",
+			"remote_addr", request.RemoteAddr,
+		)
+		writeError(responseWriter, http.StatusUnauthorized, "no session", marketdata.PathWS)
+		return
+	}
+
+	fanout := conductor.fanoutForSession(sessionID)
+	if fanout == nil {
+		conductor.log.Info("conductor: handleWS rejected — no live session",
+			"session_id", sessionID,
+			"remote_addr", request.RemoteAddr,
+		)
+		writeError(responseWriter, http.StatusNotFound, "no live session", marketdata.PathWS)
+		return
+	}
+
+	conductor.log.Info("conductor: handleWS delegating to shipped WS handler",
+		"session_id", sessionID,
+	)
+	conductor.wsHandlerFactory(fanout, conductor.wsCfg).ServeHTTP(responseWriter, request)
+}
+
