@@ -49,21 +49,41 @@ type ExchangeFactory interface {
 	NewExchange(numShards int, schedule clock.SessionSchedule, instruments []wire.InstrumentSpec) *wire.Exchange
 }
 
-// AgentOrchestrator is a PLACEHOLDER — the agent-orchestrator layer is
-// undesigned. The real signature and behavior WILL change when the
-// orchestrator is specified. The scaffold's stub implementation logs
-// and returns nil (see stubs.go). Consequence (flag, not a defect): a
-// spun-up market has no real agents until the orchestrator lands, so
-// it will not truly trade; testable in isolation only.
+// AgentOrchestrator is the agent-orchestrator layer's conductor-facing
+// surface. The real orchestrator runs as a separate process reached
+// over HTTP; adapters translate transport status into the typed error
+// sentinels in errors.go.
+//
+// BringUp is synchronous and bounded by the caller's context deadline
+// (the canonical bring-up flow derives the deadline from the Conductor
+// Config's BringUpTimeout). It is called once per market bring-up,
+// before any wiring, so a failure aborts cleanly with no exchange
+// consumers spawned.
+//
+// A PLACEHOLDER stub implementation lives in stubs.go until the real
+// orchestrator ships: the stub returns a randomized mix of nil and the
+// three orchestrator-error sentinels so every spin-up code path is
+// exercised in tests without manual swap-ins. Consequence (flag, not a
+// defect): a market brought up against the stub has no real agents and
+// will not truly trade.
 type AgentOrchestrator interface {
-	BringUp(market MarketTag, mode Mode, instruments []contract.InstrumentID) error
+	BringUp(ctx context.Context, market MarketTag, mode Mode, instruments []contract.InstrumentID) error
 }
 
-// LiquidityOperator is a PLACEHOLDER — the operator component is
-// undesigned. SeedLiquidity is fire-and-trust (no return value).
-// The scaffold's stub implementation logs and returns.
+// LiquidityOperator is the liquidity operator's conductor-facing
+// surface. The operator may run in-process or over HTTP; either way
+// SeedLiquidity is fire-and-trust — the conductor hands over the specs
+// and does not block on a response. Adapters that use the network run
+// their own goroutine so this method returns promptly on the hot path.
+//
+// ctx is passed through so adapters can observe conductor shutdown and
+// drop any in-flight transport work.
+//
+// A PLACEHOLDER stub implementation lives in stubs.go — it records a
+// randomized mix of outcomes in observable in-package counters so tests
+// can verify the stub exercised every branch.
 type LiquidityOperator interface {
-	SeedLiquidity(marketID MarketID, specs []LiquiditySpec)
+	SeedLiquidity(ctx context.Context, marketID MarketID, specs []LiquiditySpec)
 }
 
 // LiquiditySpec is the fire-and-trust payload shape. Minimal and
