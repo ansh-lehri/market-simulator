@@ -24,6 +24,14 @@ const LivenessPath = "/v1/_conductor/live"
 // value is a dial on Config.BringUpTimeout.
 const DefaultBringUpTimeout = 30 * time.Second
 
+// DefaultJoinTimeout bounds the per-request context the canonical-join
+// handler installs around JoinCanonical. One EnsureAccount round-trip
+// (durable upsert) plus one StartSession round-trip (shard reply over a
+// Postgres load + Redis snapshot seed) sits well inside five seconds on
+// a healthy stack; a slower request surfaces as 504 to the client (which
+// retries). Config.JoinTimeout overrides.
+const DefaultJoinTimeout = 5 * time.Second
+
 // Config is the construction input for NewConductor. Required fields
 // (CfgDir, OHLCVPool, Broker, Market) have no sensible default and
 // error at construction; optional fields default to the logging stubs
@@ -63,6 +71,11 @@ type Config struct {
 	// DefaultBringUpTimeout.
 	BringUpTimeout time.Duration
 
+	// JoinTimeout bounds the context the canonical-join HTTP handler
+	// passes into JoinCanonical. Zero → DefaultJoinTimeout. A slow
+	// StartSession round-trip surfaces to the client as HTTP 504.
+	JoinTimeout time.Duration
+
 	// BadConfigRetryDelay is how long each per-market timer sleeps
 	// between retries when its config fails to load or compute a next
 	// fire time. Zero → DefaultBadConfigRetryDelay (one hour) — long
@@ -89,6 +102,7 @@ type Conductor struct {
 	now                 func() time.Time
 	log                 *slog.Logger
 	bringUpTimeout      time.Duration
+	joinTimeout         time.Duration
 	badConfigRetryDelay time.Duration
 	stopOnce            sync.Once
 
@@ -141,6 +155,10 @@ func NewConductor(cfg Config) (*Conductor, error) {
 	if bringUpTimeout == 0 {
 		bringUpTimeout = DefaultBringUpTimeout
 	}
+	joinTimeout := cfg.JoinTimeout
+	if joinTimeout == 0 {
+		joinTimeout = DefaultJoinTimeout
+	}
 	badConfigRetryDelay := cfg.BadConfigRetryDelay
 	if badConfigRetryDelay == 0 {
 		badConfigRetryDelay = DefaultBadConfigRetryDelay
@@ -160,12 +178,14 @@ func NewConductor(cfg Config) (*Conductor, error) {
 		now:                 now,
 		log:                 log,
 		bringUpTimeout:      bringUpTimeout,
+		joinTimeout:         joinTimeout,
 		badConfigRetryDelay: badConfigRetryDelay,
 	}
 	log.Info("conductor: constructed",
 		"cfg_dir", cfg.CfgDir,
 		"ws_conn_buffer", conductor.wsCfg.ConnBuffer,
 		"bringup_timeout", conductor.bringUpTimeout,
+		"join_timeout", conductor.joinTimeout,
 		"bad_config_retry_delay", conductor.badConfigRetryDelay,
 	)
 	return conductor, nil
@@ -250,5 +270,9 @@ func (conductor *Conductor) MountRoutes(mux *http.ServeMux) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
-	conductor.log.Info("conductor: routes mounted", "liveness", LivenessPath)
+	mux.HandleFunc(PathSessionCanonical, conductor.handleJoinCanonical)
+	conductor.log.Info("conductor: routes mounted",
+		"liveness", LivenessPath,
+		"join_canonical", PathSessionCanonical,
+	)
 }
