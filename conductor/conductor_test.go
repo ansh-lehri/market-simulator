@@ -9,6 +9,7 @@ import (
 
 	"simulator/broker/funnel"
 	"simulator/broker/marketdata"
+	"simulator/contract"
 	"simulator/economy/lifecycle"
 	"simulator/exchange/emit"
 )
@@ -27,6 +28,10 @@ func (stubBrokerPort) StartSession(ctx context.Context, cmd funnel.SessionStartC
 
 func (stubBrokerPort) QualifyOnDemand(ctx context.Context, accountID funnel.AccountID) (bool, error) {
 	return true, nil
+}
+
+func (stubBrokerPort) WireInstance(exchangeID string, privateStream <-chan contract.EngineResult) {
+	// No-op: scaffold tests do not spawn settlement consumers.
 }
 
 type stubMarketDataPort struct{}
