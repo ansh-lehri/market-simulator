@@ -18,6 +18,12 @@ import (
 // real conductor endpoint can accidentally shadow it in a later phase.
 const LivenessPath = "/v1/_conductor/live"
 
+// DefaultBringUpTimeout bounds the synchronous AgentOrchestrator.BringUp
+// call made during canonical market bring-up. Picked as a round-number
+// upper bound well above a healthy orchestrator's response time; the
+// value is a dial on Config.BringUpTimeout.
+const DefaultBringUpTimeout = 30 * time.Second
+
 // Config is the construction input for NewConductor. Required fields
 // (CfgDir, OHLCVPool, Broker, Market) have no sensible default and
 // error at construction; optional fields default to the logging stubs
@@ -47,10 +53,15 @@ type Config struct {
 
 	// Optional dependencies — nil values fall back to safe defaults.
 	Exchange  ExchangeFactory   // nil → defaultExchangeFactory wrapping wire.NewExchange
-	Agents    AgentOrchestrator // nil → logging no-op (agent-orchestrator layer undesigned)
-	Liquidity LiquidityOperator // nil → logging no-op (operator undesigned)
+	Agents    AgentOrchestrator // nil → randomized-outcome stub (agent-orchestrator layer undesigned)
+	Liquidity LiquidityOperator // nil → randomized-outcome stub (operator undesigned)
 	Now       func() time.Time  // nil → time.Now
 	Logger    *slog.Logger      // nil → slog.Default
+
+	// BringUpTimeout bounds the synchronous AgentOrchestrator.BringUp
+	// call made during canonical market bring-up. Zero →
+	// DefaultBringUpTimeout.
+	BringUpTimeout time.Duration
 }
 
 // Conductor is this package's top-level object — holds the registry,
@@ -58,17 +69,18 @@ type Config struct {
 // reserved for the canonical bring-up phase's per-market timers. Zero
 // value is NOT usable; construct via NewConductor.
 type Conductor struct {
-	reg    *Registry
-	cfgDir string
-	ohlcv  *pgxpool.Pool
-	wsCfg  marketdata.WSConfig
-	broker BrokerPort
-	market MarketDataPort
-	exch   ExchangeFactory
-	agents AgentOrchestrator
-	liq    LiquidityOperator
-	now    func() time.Time
-	log    *slog.Logger
+	reg            *Registry
+	cfgDir         string
+	ohlcv          *pgxpool.Pool
+	wsCfg          marketdata.WSConfig
+	broker         BrokerPort
+	market         MarketDataPort
+	exch           ExchangeFactory
+	agents         AgentOrchestrator
+	liq            LiquidityOperator
+	now            func() time.Time
+	log            *slog.Logger
+	bringUpTimeout time.Duration
 
 	// Timer-lifecycle fields reserved for the canonical bring-up phase
 	// — one per-market timer goroutine fires market-open minus the
@@ -108,29 +120,36 @@ func NewConductor(cfg Config) (*Conductor, error) {
 	}
 	agents := cfg.Agents
 	if agents == nil {
-		agents = stubAgentOrchestrator{log: log}
+		// Seed 0 → the constructor substitutes time.Now().UnixNano().
+		agents = newStubAgentOrchestrator(log, 0)
 	}
 	liq := cfg.Liquidity
 	if liq == nil {
-		liq = stubLiquidityOperator{log: log}
+		liq = newStubLiquidityOperator(log, 0)
+	}
+	bringUpTimeout := cfg.BringUpTimeout
+	if bringUpTimeout == 0 {
+		bringUpTimeout = DefaultBringUpTimeout
 	}
 
 	conductor := &Conductor{
-		reg:    newRegistry(),
-		cfgDir: cfg.CfgDir,
-		ohlcv:  cfg.OHLCVPool,
-		wsCfg:  cfg.Market.WSConfig(),
-		broker: cfg.Broker,
-		market: cfg.Market,
-		exch:   exch,
-		agents: agents,
-		liq:    liq,
-		now:    now,
-		log:    log,
+		reg:            newRegistry(),
+		cfgDir:         cfg.CfgDir,
+		ohlcv:          cfg.OHLCVPool,
+		wsCfg:          cfg.Market.WSConfig(),
+		broker:         cfg.Broker,
+		market:         cfg.Market,
+		exch:           exch,
+		agents:         agents,
+		liq:            liq,
+		now:            now,
+		log:            log,
+		bringUpTimeout: bringUpTimeout,
 	}
 	log.Info("conductor: constructed",
 		"cfg_dir", cfg.CfgDir,
 		"ws_conn_buffer", conductor.wsCfg.ConnBuffer,
+		"bringup_timeout", conductor.bringUpTimeout,
 	)
 	return conductor, nil
 }
