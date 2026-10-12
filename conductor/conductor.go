@@ -72,6 +72,7 @@ type Conductor struct {
 	reg            *Registry
 	cfgDir         string
 	ohlcv          *pgxpool.Pool
+	referenceReader candleReader // defaults to ohlcv; test seam for in-package tests only
 	wsCfg          marketdata.WSConfig
 	broker         BrokerPort
 	market         MarketDataPort
@@ -133,18 +134,19 @@ func NewConductor(cfg Config) (*Conductor, error) {
 	}
 
 	conductor := &Conductor{
-		reg:            newRegistry(),
-		cfgDir:         cfg.CfgDir,
-		ohlcv:          cfg.OHLCVPool,
-		wsCfg:          cfg.Market.WSConfig(),
-		broker:         cfg.Broker,
-		market:         cfg.Market,
-		exch:           exch,
-		agents:         agents,
-		liq:            liq,
-		now:            now,
-		log:            log,
-		bringUpTimeout: bringUpTimeout,
+		reg:             newRegistry(),
+		cfgDir:          cfg.CfgDir,
+		ohlcv:           cfg.OHLCVPool,
+		referenceReader: cfg.OHLCVPool, // *pgxpool.Pool satisfies candleReader
+		wsCfg:           cfg.Market.WSConfig(),
+		broker:          cfg.Broker,
+		market:          cfg.Market,
+		exch:            exch,
+		agents:          agents,
+		liq:             liq,
+		now:             now,
+		log:             log,
+		bringUpTimeout:  bringUpTimeout,
 	}
 	log.Info("conductor: constructed",
 		"cfg_dir", cfg.CfgDir,
