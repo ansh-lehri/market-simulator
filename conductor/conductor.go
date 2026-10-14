@@ -47,6 +47,18 @@ const DefaultJoinTimeout = 5 * time.Second
 // cluster. Config.AccountOpenTimeout overrides.
 const DefaultAccountOpenTimeout = 3 * time.Second
 
+// DefaultSetupTimeout bounds the per-request context the on-demand
+// trigger handler installs around StartOnDemand. The held setup walks
+// EnsureAccount → QualifyOnDemand → agents.BringUp → NewExchange →
+// WireInstance (both axes) → Start → StartSession; the dominant cost
+// is agents.BringUp (synchronous orchestrator round-trip) plus the
+// StartSession shard reply over the account's durable load. Ninety
+// seconds is loose enough that a healthy stack never trips it even
+// with a slow orchestrator, tight enough that a wedged request
+// surfaces to the client as a 503 within a browser's attention span.
+// Config.SetupTimeout overrides.
+const DefaultSetupTimeout = 90 * time.Second
+
 // Config is the construction input for NewConductor. Required fields
 // (CfgDir, OHLCVPool, Broker, Market) have no sensible default and
 // error at construction; optional fields default to the logging stubs
@@ -103,6 +115,14 @@ type Config struct {
 	// client as HTTP 504.
 	AccountOpenTimeout time.Duration
 
+	// SetupTimeout bounds the context the on-demand trigger HTTP
+	// handler passes into StartOnDemand. The whole held-setup path —
+	// EnsureAccount, QualifyOnDemand gate, agents.BringUp, exchange
+	// construct + wire + Start, StartSession seal — runs under this
+	// deadline. Zero → DefaultSetupTimeout. Expiry surfaces to the
+	// client as HTTP 503 {status:"failed", reason:"..."}.
+	SetupTimeout time.Duration
+
 	// BadConfigRetryDelay is how long each per-market timer sleeps
 	// between retries when its config fails to load or compute a next
 	// fire time. Zero → DefaultBadConfigRetryDelay (one hour) — long
@@ -131,6 +151,7 @@ type Conductor struct {
 	bringUpTimeout      time.Duration
 	joinTimeout         time.Duration
 	accountOpenTimeout  time.Duration
+	setupTimeout        time.Duration
 	badConfigRetryDelay time.Duration
 	wsHandlerFactory    wsHandlerFactoryFn
 	stopOnce            sync.Once
@@ -192,6 +213,10 @@ func NewConductor(cfg Config) (*Conductor, error) {
 	if accountOpenTimeout == 0 {
 		accountOpenTimeout = DefaultAccountOpenTimeout
 	}
+	setupTimeout := cfg.SetupTimeout
+	if setupTimeout == 0 {
+		setupTimeout = DefaultSetupTimeout
+	}
 	wsHandlerFactory := cfg.WSHandlerFactory
 	if wsHandlerFactory == nil {
 		wsHandlerFactory = marketdata.NewWSHandler
@@ -217,6 +242,7 @@ func NewConductor(cfg Config) (*Conductor, error) {
 		bringUpTimeout:      bringUpTimeout,
 		joinTimeout:         joinTimeout,
 		accountOpenTimeout:  accountOpenTimeout,
+		setupTimeout:        setupTimeout,
 		badConfigRetryDelay: badConfigRetryDelay,
 		wsHandlerFactory:    wsHandlerFactory,
 	}
@@ -226,6 +252,7 @@ func NewConductor(cfg Config) (*Conductor, error) {
 		"bringup_timeout", conductor.bringUpTimeout,
 		"join_timeout", conductor.joinTimeout,
 		"account_open_timeout", conductor.accountOpenTimeout,
+		"setup_timeout", conductor.setupTimeout,
 		"bad_config_retry_delay", conductor.badConfigRetryDelay,
 	)
 	return conductor, nil
