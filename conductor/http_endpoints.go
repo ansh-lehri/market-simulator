@@ -18,6 +18,22 @@ import (
 // duplicate the string.
 const PathSessionCanonical = "/session/canonical"
 
+// PathMarkets is the catalog + liveness + canonical session-window read
+// the pre-join screen hits. Reads config + a brief registry scan;
+// returns identity and schedule only (no prices — those are the
+// market-data WebSocket stream's domain).
+const PathMarkets = "/v1/markets"
+
+// PathInstruments is the per-market static instrument list. Config-only
+// read; works whether the market is live or closed; never serves
+// price/quote/depth.
+const PathInstruments = "/v1/instruments"
+
+// PathAccountOpen is the signup/login handshake. One sole call into
+// broker.EnsureAccount; idempotent (200 for both signup and login);
+// money-blind (returns only the account handle, never balances).
+const PathAccountOpen = "/v1/account/open"
+
 // --- JSON wire shapes -------------------------------------------------
 
 // joinRequestBody is the POST /session/canonical request envelope. The
