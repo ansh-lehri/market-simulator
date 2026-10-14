@@ -18,6 +18,31 @@ import (
 // warmup_ends_at + session_ends_at the UI counts down against.
 const PathSessionOnDemand = "/session/ondemand"
 
+// PathSessionStatus is the fallback/recovery endpoint — a pure
+// registry read that returns the current state of one session. The
+// frontend's happy path never hits this; the trigger response's
+// warmup_ends_at/session_ends_at are what drives the UI. This
+// endpoint exists for cases where the held POST was lost mid-flight
+// (page refresh, flaky network) and the frontend needs to re-verify
+// "do I actually have a live session, and if so, when does it end?"
+//
+// The carrier mirrors the WebSocket: ?session=<sid>. Deliberately
+// chosen over a path parameter (/session/{id}/status) because every
+// other shipped route in this package is a flat constant string and
+// the frontend already knows the ?session= carrier shape from the
+// WebSocket connect.
+const PathSessionStatus = "/session/status"
+
+// Session status label literals the handler writes verbatim. One
+// label per observable Session state. Centralized so a future doc
+// says "ready" and the response says the same word.
+const (
+	sessionStatusLabelWarmingUp = "warming_up"
+	sessionStatusLabelReady     = "ready"
+	sessionStatusLabelFailed    = "failed"
+	sessionStatusLabelEnded     = "ended"
+)
+
 // On-demand duration bounds (integer minutes). The HTTP layer enforces
 // these before the flow runs — a value outside the range is a client
 // bug mapped to 400 (not a setup failure).
@@ -62,6 +87,25 @@ type onDemandInsufficientFundsBody struct {
 type onDemandFailedBody struct {
 	Status string `json:"status"`
 	Reason string `json:"reason"`
+}
+
+// sessionStatusBody is the status endpoint's response envelope.
+// Three optional fields keep the shape consistent across all four
+// Status values while hiding fields that would carry zero-values:
+//
+//   - "warming_up": warmup_ends_at and session_ends_at are included
+//     only if the Market record exists (a Starting session with no
+//     Market yet omits both — this is the brief window between the
+//     reservation and the Market-create lock take).
+//   - "ready": both times are always included.
+//   - "failed": reason is always included; times are omitted (the
+//     Market record was deleted at failOnDemand).
+//   - "ended": no extras (reserved for Tier-3 teardown states).
+type sessionStatusBody struct {
+	Status        string `json:"status"`
+	WarmupEndsAt  string `json:"warmup_ends_at,omitempty"`
+	SessionEndsAt string `json:"session_ends_at,omitempty"`
+	Reason        string `json:"reason,omitempty"`
 }
 
 // --- status mapper ----------------------------------------------------
@@ -243,7 +287,7 @@ func (conductor *Conductor) handleStartOnDemand(responseWriter http.ResponseWrit
 	switch result.Kind {
 	case OnDemandWarmingUp:
 		writeJSON(responseWriter, status, onDemandWarmingUpBody{
-			Status:        "warming_up",
+			Status:        sessionStatusLabelWarmingUp,
 			SessionID:     string(result.SessionID),
 			WarmupEndsAt:  result.WarmupEndsAt.UTC().Format(time.RFC3339Nano),
 			SessionEndsAt: result.SessionEndsAt.UTC().Format(time.RFC3339Nano),
@@ -262,4 +306,126 @@ func (conductor *Conductor) handleStartOnDemand(responseWriter http.ResponseWrit
 		)
 		writeError(responseWriter, http.StatusInternalServerError, "unknown result kind", PathSessionOnDemand)
 	}
+}
+
+// --- GET /session/status (fallback / recovery) -----------------------
+
+// sessionStatusSnapshot is the pure registry read the status handler
+// delegates to. Takes the one registry mutex for the microsecond map
+// lookups, copies out everything the response body needs, releases
+// before formatting or writing. Zero mutations anywhere — a snapshot
+// of the registry before and after the call is byte-identical.
+//
+// Returns found=false if the session doesn't exist (handler writes
+// 404). Returns found=true with:
+//
+//   - statusLabel: the user-visible string ("warming_up" / "ready" /
+//     "failed" / "ended") derived from Session.State. The two
+//     intermediate SessionStates (Stopping, Ended) both map to
+//     "ended" — the UI only cares that the session is no longer
+//     operable.
+//   - warmupEndsAt / closeAt: zero time.Time values if the Market
+//     record does not exist or has not yet stamped them (a Starting
+//     session before the finalize-Live lock take). Handler then omits
+//     the fields from the response body via the json ",omitempty"
+//     tag.
+//   - failReason: the FailReason text when the session is in Failed
+//     state; empty string otherwise.
+//
+// Deliberately NO defer-unlock: the lock→copy→unlock sequence is
+// written out so a reader sees directly that the mutex is released
+// before any further work (string formatting, response write)
+// happens. Matches the fanoutForSession pattern in http_endpoints.go.
+func (conductor *Conductor) sessionStatusSnapshot(sessionID SessionID) (
+	statusLabel string,
+	warmupEndsAt time.Time,
+	closeAt time.Time,
+	failReason string,
+	found bool,
+) {
+	conductor.reg.mu.Lock()
+	session := conductor.reg.sessions[sessionID]
+	if session == nil {
+		conductor.reg.mu.Unlock()
+		return "", time.Time{}, time.Time{}, "", false
+	}
+	sessionState := session.State
+	failReason = session.FailReason
+	marketID := session.Market
+	if marketRecord := conductor.reg.markets[marketID]; marketRecord != nil {
+		warmupEndsAt = marketRecord.warmupEndsAt
+		closeAt = marketRecord.closeAt
+	}
+	conductor.reg.mu.Unlock()
+
+	switch sessionState {
+	case Starting:
+		statusLabel = sessionStatusLabelWarmingUp
+	case Active:
+		statusLabel = sessionStatusLabelReady
+	case Failed:
+		statusLabel = sessionStatusLabelFailed
+	case Stopping, Ended:
+		statusLabel = sessionStatusLabelEnded
+	default:
+		// Unknown SessionState (should not happen — enum is sealed).
+		// Return "ended" as a safe fallback so a future enum addition
+		// without a case update does not expose a zero-value label.
+		statusLabel = sessionStatusLabelEnded
+	}
+	return statusLabel, warmupEndsAt, closeAt, failReason, true
+}
+
+// handleSessionStatus is the status endpoint. Reads the sessionID
+// from the ?session= query (same carrier as the WebSocket, via the
+// shared authFromRequest helper), looks up the registry, and writes
+// one of three response shapes:
+//
+//   - 200 with sessionStatusBody on a known session.
+//   - 400 if the carrier is absent (empty ?session=).
+//   - 404 if the sessionID isn't in the registry.
+//   - 405 for non-GET.
+//
+// Pure read. The registry is not mutated — a status call cannot
+// cause state to change. Multiple concurrent status reads serialize
+// through the one mutex but each spends only the microseconds the
+// map lookups take.
+func (conductor *Conductor) handleSessionStatus(responseWriter http.ResponseWriter, request *http.Request) {
+	defer recoverPanic(responseWriter, PathSessionStatus)
+
+	if request.Method != http.MethodGet {
+		writeError(responseWriter, http.StatusMethodNotAllowed, "method not allowed", PathSessionStatus)
+		return
+	}
+
+	sessionID := authFromRequest(request)
+	if sessionID == "" {
+		conductor.log.Info("conductor: handleSessionStatus missing session carrier",
+			"remote_addr", request.RemoteAddr,
+		)
+		writeError(responseWriter, http.StatusBadRequest, "session query parameter required", PathSessionStatus)
+		return
+	}
+
+	statusLabel, warmupEndsAt, closeAt, failReason, found := conductor.sessionStatusSnapshot(sessionID)
+	if !found {
+		conductor.log.Info("conductor: handleSessionStatus unknown session",
+			"session_id", sessionID,
+			"remote_addr", request.RemoteAddr,
+		)
+		writeError(responseWriter, http.StatusNotFound, "unknown session", PathSessionStatus)
+		return
+	}
+
+	responseBody := sessionStatusBody{Status: statusLabel}
+	if !warmupEndsAt.IsZero() {
+		responseBody.WarmupEndsAt = warmupEndsAt.UTC().Format(time.RFC3339Nano)
+	}
+	if !closeAt.IsZero() {
+		responseBody.SessionEndsAt = closeAt.UTC().Format(time.RFC3339Nano)
+	}
+	if statusLabel == sessionStatusLabelFailed {
+		responseBody.Reason = failReason
+	}
+	writeJSON(responseWriter, http.StatusOK, responseBody, PathSessionStatus)
 }

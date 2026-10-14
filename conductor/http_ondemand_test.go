@@ -446,3 +446,362 @@ func TestMountRoutes_RegistersOnDemand(t *testing.T) {
 		t.Errorf("liveness status = %d, want 200 (route regression)", livenessResp.StatusCode)
 	}
 }
+
+// --- GET /session/status helpers --------------------------------------
+
+// getSessionStatus issues a GET to handleSessionStatus directly with
+// the given query string (no leading '?').
+func getSessionStatus(t *testing.T, conductor *Conductor, method string, rawQuery string) *httptest.ResponseRecorder {
+	t.Helper()
+	target := PathSessionStatus
+	if rawQuery != "" {
+		target += "?" + rawQuery
+	}
+	request := httptest.NewRequest(method, target, nil)
+	recorder := httptest.NewRecorder()
+	conductor.handleSessionStatus(recorder, request)
+	return recorder
+}
+
+// installSessionDirect places a Session (and optional Market) in the
+// registry without walking the real flow — so each status test can
+// program its exact pre-condition (Starting with no Market, Starting
+// with Market, Active, Failed, etc.) without time-dependent setup.
+func installSessionDirect(
+	t *testing.T,
+	conductor *Conductor,
+	sessionState SessionState,
+	failReason string,
+	withMarket bool,
+	warmupEndsAt time.Time,
+	closeAt time.Time,
+) SessionID {
+	t.Helper()
+	sessionID := SessionID(newUUIDv4())
+	userID := UserID("human-" + newUUIDv4()[:8])
+	marketID := MarketID("od:" + string(sessionID))
+	session := &Session{
+		ID:          sessionID,
+		User:        userID,
+		Market:      marketID,
+		AccountType: Ephemeral,
+		State:       sessionState,
+		FailReason:  failReason,
+	}
+	conductor.reg.mu.Lock()
+	conductor.reg.sessions[sessionID] = session
+	conductor.reg.byUser[userID] = session
+	if withMarket {
+		conductor.reg.markets[marketID] = &Market{
+			ID:           marketID,
+			Mode:         OnDemand,
+			Tag:          "IN",
+			State:        Live,
+			warmupEndsAt: warmupEndsAt,
+			closeAt:      closeAt,
+			members:      map[SessionID]struct{}{sessionID: {}},
+		}
+	}
+	conductor.reg.mu.Unlock()
+	return sessionID
+}
+
+// decodeSessionStatus parses the JSON response body into a
+// sessionStatusBody. Fatals with a readable message on decode error.
+func decodeSessionStatus(t *testing.T, recorder *httptest.ResponseRecorder) sessionStatusBody {
+	t.Helper()
+	var body sessionStatusBody
+	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode session status body: %v (raw=%q)", err, recorder.Body.String())
+	}
+	return body
+}
+
+// --- Starting session with no Market record --------------------------
+
+// TestHandleSessionStatus_StartingWithoutMarket covers the brief
+// window between the per-user reservation and the Market-create lock
+// take: the Session exists in Starting state, but no Market record
+// has been reserved yet. The handler must return warming_up with no
+// times (omitempty hides the two zero fields).
+func TestHandleSessionStatus_StartingWithoutMarket(t *testing.T) {
+	harness := newOnDemandHarness(t, "IN")
+	sessionID := installSessionDirect(t, harness.conductor, Starting, "", false, time.Time{}, time.Time{})
+
+	recorder := getSessionStatus(t, harness.conductor, http.MethodGet, "session="+string(sessionID))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200. body=%q", recorder.Code, recorder.Body.String())
+	}
+	body := decodeSessionStatus(t, recorder)
+	if body.Status != sessionStatusLabelWarmingUp {
+		t.Errorf("status = %q, want %q", body.Status, sessionStatusLabelWarmingUp)
+	}
+	if body.WarmupEndsAt != "" || body.SessionEndsAt != "" {
+		t.Errorf("times must be omitted when Market record is absent: warmup=%q session=%q",
+			body.WarmupEndsAt, body.SessionEndsAt)
+	}
+	if body.Reason != "" {
+		t.Errorf("reason must be empty on non-failed status; got %q", body.Reason)
+	}
+}
+
+// --- Starting session with Market times already stamped --------------
+
+func TestHandleSessionStatus_StartingWithMarket(t *testing.T) {
+	harness := newOnDemandHarness(t, "IN")
+	warmupEndsAt := time.Date(2026, 10, 12, 12, 0, 0, 0, time.UTC)
+	closeAt := warmupEndsAt.Add(30 * time.Minute)
+	sessionID := installSessionDirect(t, harness.conductor, Starting, "", true, warmupEndsAt, closeAt)
+
+	recorder := getSessionStatus(t, harness.conductor, http.MethodGet, "session="+string(sessionID))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200. body=%q", recorder.Code, recorder.Body.String())
+	}
+	body := decodeSessionStatus(t, recorder)
+	if body.Status != sessionStatusLabelWarmingUp {
+		t.Errorf("status = %q, want %q", body.Status, sessionStatusLabelWarmingUp)
+	}
+	gotWarmupEnds, _ := time.Parse(time.RFC3339Nano, body.WarmupEndsAt)
+	gotSessionEnds, _ := time.Parse(time.RFC3339Nano, body.SessionEndsAt)
+	if !gotWarmupEnds.Equal(warmupEndsAt) {
+		t.Errorf("warmup_ends_at = %s, want %s", gotWarmupEnds, warmupEndsAt)
+	}
+	if !gotSessionEnds.Equal(closeAt) {
+		t.Errorf("session_ends_at = %s, want %s", gotSessionEnds, closeAt)
+	}
+}
+
+// --- Active session (post-finalize) → ready + times -----------------
+
+func TestHandleSessionStatus_Active(t *testing.T) {
+	harness := newOnDemandHarness(t, "IN")
+	warmupEndsAt := time.Date(2026, 10, 12, 11, 38, 47, 500_000_000, time.UTC)
+	closeAt := warmupEndsAt.Add(45 * time.Minute)
+	sessionID := installSessionDirect(t, harness.conductor, Active, "", true, warmupEndsAt, closeAt)
+
+	recorder := getSessionStatus(t, harness.conductor, http.MethodGet, "session="+string(sessionID))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200. body=%q", recorder.Code, recorder.Body.String())
+	}
+	body := decodeSessionStatus(t, recorder)
+	if body.Status != sessionStatusLabelReady {
+		t.Errorf("status = %q, want %q", body.Status, sessionStatusLabelReady)
+	}
+	gotWarmupEnds, _ := time.Parse(time.RFC3339Nano, body.WarmupEndsAt)
+	gotSessionEnds, _ := time.Parse(time.RFC3339Nano, body.SessionEndsAt)
+	if !gotWarmupEnds.Equal(warmupEndsAt) {
+		t.Errorf("warmup_ends_at = %s, want %s", gotWarmupEnds, warmupEndsAt)
+	}
+	if !gotSessionEnds.Equal(closeAt) {
+		t.Errorf("session_ends_at = %s, want %s", gotSessionEnds, closeAt)
+	}
+	if body.Reason != "" {
+		t.Errorf("reason must be empty on ready status; got %q", body.Reason)
+	}
+}
+
+// --- Failed session → failed + reason, no times ---------------------
+
+func TestHandleSessionStatus_Failed(t *testing.T) {
+	harness := newOnDemandHarness(t, "IN")
+	// Failed sessions have no Market record (failOnDemand deletes it);
+	// install without the market so the response omits the two time
+	// fields even though the FailReason is populated.
+	failReason := "install_failed: funnel: request timed out"
+	sessionID := installSessionDirect(t, harness.conductor, Failed, failReason, false, time.Time{}, time.Time{})
+
+	recorder := getSessionStatus(t, harness.conductor, http.MethodGet, "session="+string(sessionID))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200. body=%q", recorder.Code, recorder.Body.String())
+	}
+	body := decodeSessionStatus(t, recorder)
+	if body.Status != sessionStatusLabelFailed {
+		t.Errorf("status = %q, want %q", body.Status, sessionStatusLabelFailed)
+	}
+	if body.Reason != failReason {
+		t.Errorf("reason = %q, want %q", body.Reason, failReason)
+	}
+	if body.WarmupEndsAt != "" || body.SessionEndsAt != "" {
+		t.Errorf("times must be omitted on failed status: warmup=%q session=%q",
+			body.WarmupEndsAt, body.SessionEndsAt)
+	}
+}
+
+// --- Unknown session → 404 ------------------------------------------
+
+func TestHandleSessionStatus_UnknownSession(t *testing.T) {
+	harness := newOnDemandHarness(t, "IN")
+	recorder := getSessionStatus(t, harness.conductor, http.MethodGet, "session=never-existed-anywhere")
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404. body=%q", recorder.Code, recorder.Body.String())
+	}
+	assertErrorBody(t, recorder)
+}
+
+// --- Missing session carrier → 400 ----------------------------------
+
+func TestHandleSessionStatus_MissingSessionParam(t *testing.T) {
+	cases := []struct {
+		name  string
+		query string
+	}{
+		{"no query at all", ""},
+		{"empty session value", "session="},
+		{"other param only", "foo=bar"},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			harness := newOnDemandHarness(t, "IN")
+			recorder := getSessionStatus(t, harness.conductor, http.MethodGet, testCase.query)
+			if recorder.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400. body=%q", recorder.Code, recorder.Body.String())
+			}
+			assertErrorBody(t, recorder)
+		})
+	}
+}
+
+// --- Non-GET → 405 ---------------------------------------------------
+
+func TestHandleSessionStatus_NonGETReturns405(t *testing.T) {
+	cases := []string{http.MethodPost, http.MethodPut, http.MethodDelete}
+	for _, method := range cases {
+		t.Run(method, func(t *testing.T) {
+			harness := newOnDemandHarness(t, "IN")
+			recorder := getSessionStatus(t, harness.conductor, method, "session=anything")
+			if recorder.Code != http.StatusMethodNotAllowed {
+				t.Fatalf("status = %d, want 405. body=%q", recorder.Code, recorder.Body.String())
+			}
+		})
+	}
+}
+
+// --- Pure read: registry unchanged across the call -------------------
+
+// TestHandleSessionStatus_PureRead proves the status endpoint has
+// zero side effects on the registry — the map lengths and the stored
+// Session record are byte-identical before and after. If a future
+// edit accidentally slips a mutation into the handler (e.g. "touch
+// the session with a last-read timestamp"), this test fails loudly.
+func TestHandleSessionStatus_PureRead(t *testing.T) {
+	harness := newOnDemandHarness(t, "IN")
+	warmupEndsAt := time.Date(2026, 10, 12, 12, 0, 0, 0, time.UTC)
+	closeAt := warmupEndsAt.Add(60 * time.Minute)
+	sessionID := installSessionDirect(t, harness.conductor, Active, "", true, warmupEndsAt, closeAt)
+	marketID := MarketID("od:" + string(sessionID))
+
+	// Snapshot the registry before the call.
+	harness.conductor.reg.mu.Lock()
+	preSessionsCount := len(harness.conductor.reg.sessions)
+	preMarketsCount := len(harness.conductor.reg.markets)
+	preByUserCount := len(harness.conductor.reg.byUser)
+	preSessionCopy := *harness.conductor.reg.sessions[sessionID]
+	preMarketWarmup := harness.conductor.reg.markets[marketID].warmupEndsAt
+	preMarketClose := harness.conductor.reg.markets[marketID].closeAt
+	preMarketState := harness.conductor.reg.markets[marketID].State
+	harness.conductor.reg.mu.Unlock()
+
+	// Issue the status read.
+	recorder := getSessionStatus(t, harness.conductor, http.MethodGet, "session="+string(sessionID))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status read: status = %d, body=%q", recorder.Code, recorder.Body.String())
+	}
+
+	// Snapshot after and compare.
+	harness.conductor.reg.mu.Lock()
+	defer harness.conductor.reg.mu.Unlock()
+	if len(harness.conductor.reg.sessions) != preSessionsCount {
+		t.Errorf("sessions count mutated: before=%d after=%d",
+			preSessionsCount, len(harness.conductor.reg.sessions))
+	}
+	if len(harness.conductor.reg.markets) != preMarketsCount {
+		t.Errorf("markets count mutated: before=%d after=%d",
+			preMarketsCount, len(harness.conductor.reg.markets))
+	}
+	if len(harness.conductor.reg.byUser) != preByUserCount {
+		t.Errorf("byUser count mutated: before=%d after=%d",
+			preByUserCount, len(harness.conductor.reg.byUser))
+	}
+	postSession := *harness.conductor.reg.sessions[sessionID]
+	if postSession != preSessionCopy {
+		t.Errorf("session record mutated by status read: before=%+v after=%+v",
+			preSessionCopy, postSession)
+	}
+	postMarket := harness.conductor.reg.markets[marketID]
+	if !postMarket.warmupEndsAt.Equal(preMarketWarmup) ||
+		!postMarket.closeAt.Equal(preMarketClose) ||
+		postMarket.State != preMarketState {
+		t.Error("market record mutated by status read")
+	}
+}
+
+// --- End-to-end: trigger → status chain ------------------------------
+
+// TestHandleSessionStatus_EndToEndAfterStartOnDemand exercises the
+// full integration: a real happy-path POST to /session/ondemand
+// produces an Active session, then GET /session/status?session=<sid>
+// returns "ready" with the same times the trigger returned. Proves
+// the two endpoints agree on the shape of a live session.
+func TestHandleSessionStatus_EndToEndAfterStartOnDemand(t *testing.T) {
+	harness := newOnDemandHarness(t, "IN")
+	triggerRecorder := postOnDemand(t, harness.conductor, http.MethodPost,
+		"market=IN&duration=42", standardOnDemandBody("human-e2e"))
+	if triggerRecorder.Code != http.StatusOK {
+		t.Fatalf("trigger status = %d, body=%q", triggerRecorder.Code, triggerRecorder.Body.String())
+	}
+	var triggerBody onDemandWarmingUpBody
+	if err := json.Unmarshal(triggerRecorder.Body.Bytes(), &triggerBody); err != nil {
+		t.Fatalf("decode trigger body: %v", err)
+	}
+
+	statusRecorder := getSessionStatus(t, harness.conductor, http.MethodGet, "session="+triggerBody.SessionID)
+	if statusRecorder.Code != http.StatusOK {
+		t.Fatalf("status read: status = %d, body=%q", statusRecorder.Code, statusRecorder.Body.String())
+	}
+	statusBody := decodeSessionStatus(t, statusRecorder)
+	if statusBody.Status != sessionStatusLabelReady {
+		t.Errorf("status = %q, want %q (post-finalize active session)",
+			statusBody.Status, sessionStatusLabelReady)
+	}
+	if statusBody.WarmupEndsAt != triggerBody.WarmupEndsAt {
+		t.Errorf("warmup_ends_at from status (%q) != from trigger (%q)",
+			statusBody.WarmupEndsAt, triggerBody.WarmupEndsAt)
+	}
+	if statusBody.SessionEndsAt != triggerBody.SessionEndsAt {
+		t.Errorf("session_ends_at from status (%q) != from trigger (%q)",
+			statusBody.SessionEndsAt, triggerBody.SessionEndsAt)
+	}
+}
+
+// --- MountRoutes registers /session/status --------------------------
+
+func TestMountRoutes_RegistersSessionStatus(t *testing.T) {
+	harness := newOnDemandHarness(t, "IN")
+	sessionID := installSessionDirect(t, harness.conductor, Active, "", true,
+		time.Date(2026, 10, 12, 12, 0, 0, 0, time.UTC),
+		time.Date(2026, 10, 12, 13, 0, 0, 0, time.UTC),
+	)
+	mux := http.NewServeMux()
+	harness.conductor.MountRoutes(mux)
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+
+	response, err := http.Get(server.URL + PathSessionStatus + "?session=" + string(sessionID))
+	if err != nil {
+		t.Fatalf("GET through mux: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("mux GET status = %d, want 200", response.StatusCode)
+	}
+
+	// No regression on the pre-existing routes.
+	livenessResp, livenessErr := http.Get(server.URL + LivenessPath)
+	if livenessErr != nil {
+		t.Fatalf("liveness GET: %v", livenessErr)
+	}
+	defer livenessResp.Body.Close()
+	if livenessResp.StatusCode != http.StatusOK {
+		t.Errorf("liveness status = %d, want 200 (route regression)", livenessResp.StatusCode)
+	}
+}
