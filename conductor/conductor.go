@@ -38,6 +38,15 @@ const DefaultBringUpTimeout = 30 * time.Second
 // retries). Config.JoinTimeout overrides.
 const DefaultJoinTimeout = 5 * time.Second
 
+// DefaultAccountOpenTimeout bounds the per-request context the
+// account-open handler installs around EnsureAccount. One durable
+// upsert round-trip (open_account INSERT on uq_accounts_owner, falling
+// back to AccountHandle on the UNIQUE conflict) is sub-second on a
+// healthy Postgres; three seconds is tight enough that a stuck request
+// surfaces to the client fast but loose enough to tolerate a spiky
+// cluster. Config.AccountOpenTimeout overrides.
+const DefaultAccountOpenTimeout = 3 * time.Second
+
 // Config is the construction input for NewConductor. Required fields
 // (CfgDir, OHLCVPool, Broker, Market) have no sensible default and
 // error at construction; optional fields default to the logging stubs
@@ -88,6 +97,12 @@ type Config struct {
 	// StartSession round-trip surfaces to the client as HTTP 504.
 	JoinTimeout time.Duration
 
+	// AccountOpenTimeout bounds the context the account-open HTTP
+	// handler passes into broker.EnsureAccount. Zero →
+	// DefaultAccountOpenTimeout. A slow durable upsert surfaces to the
+	// client as HTTP 504.
+	AccountOpenTimeout time.Duration
+
 	// BadConfigRetryDelay is how long each per-market timer sleeps
 	// between retries when its config fails to load or compute a next
 	// fire time. Zero → DefaultBadConfigRetryDelay (one hour) — long
@@ -115,6 +130,7 @@ type Conductor struct {
 	log                 *slog.Logger
 	bringUpTimeout      time.Duration
 	joinTimeout         time.Duration
+	accountOpenTimeout  time.Duration
 	badConfigRetryDelay time.Duration
 	wsHandlerFactory    wsHandlerFactoryFn
 	stopOnce            sync.Once
@@ -172,6 +188,10 @@ func NewConductor(cfg Config) (*Conductor, error) {
 	if joinTimeout == 0 {
 		joinTimeout = DefaultJoinTimeout
 	}
+	accountOpenTimeout := cfg.AccountOpenTimeout
+	if accountOpenTimeout == 0 {
+		accountOpenTimeout = DefaultAccountOpenTimeout
+	}
 	wsHandlerFactory := cfg.WSHandlerFactory
 	if wsHandlerFactory == nil {
 		wsHandlerFactory = marketdata.NewWSHandler
@@ -196,6 +216,7 @@ func NewConductor(cfg Config) (*Conductor, error) {
 		log:                 log,
 		bringUpTimeout:      bringUpTimeout,
 		joinTimeout:         joinTimeout,
+		accountOpenTimeout:  accountOpenTimeout,
 		badConfigRetryDelay: badConfigRetryDelay,
 		wsHandlerFactory:    wsHandlerFactory,
 	}
@@ -204,6 +225,7 @@ func NewConductor(cfg Config) (*Conductor, error) {
 		"ws_conn_buffer", conductor.wsCfg.ConnBuffer,
 		"bringup_timeout", conductor.bringUpTimeout,
 		"join_timeout", conductor.joinTimeout,
+		"account_open_timeout", conductor.accountOpenTimeout,
 		"bad_config_retry_delay", conductor.badConfigRetryDelay,
 	)
 	return conductor, nil
@@ -290,9 +312,15 @@ func (conductor *Conductor) MountRoutes(mux *http.ServeMux) {
 	})
 	mux.HandleFunc(PathSessionCanonical, conductor.handleJoinCanonical)
 	mux.HandleFunc(marketdata.PathWS, conductor.handleWS)
+	mux.HandleFunc(PathMarkets, conductor.handleMarkets)
+	mux.HandleFunc(PathInstruments, conductor.handleInstruments)
+	mux.HandleFunc(PathAccountOpen, conductor.handleAccountOpen)
 	conductor.log.Info("conductor: routes mounted",
 		"liveness", LivenessPath,
 		"join_canonical", PathSessionCanonical,
 		"ws", marketdata.PathWS,
+		"markets", PathMarkets,
+		"instruments", PathInstruments,
+		"account_open", PathAccountOpen,
 	)
 }
