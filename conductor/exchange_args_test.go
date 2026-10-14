@@ -294,6 +294,161 @@ func TestBuildExchangeArgs_ScheduleValidationPrecedesReferenceRead(t *testing.T)
 	}
 }
 
+// --- buildInstrumentSpecs (standalone helper) --------------------------
+
+// TestBuildInstrumentSpecs_StandAlone exercises the extracted helper
+// directly — the shape the on-demand bring-up calls (passing a
+// construct-time openInstant that is NOT a wall-clock session open).
+// The canonical caller already exercises the helper transitively; this
+// test proves the helper is callable in isolation with any openInstant
+// a future caller supplies, and that every spec field is wired through
+// the same mapping the canonical path uses.
+func TestBuildInstrumentSpecs_StandAlone(t *testing.T) {
+	instruments := []InstrumentConfig{
+		{
+			ID:        contract.InstrumentID("RELIANCE"),
+			TickSize:  contract.Ticks(5),
+			BandBps:   1000,
+			SeedPrice: contract.Ticks(250000),
+		},
+		{
+			ID:        contract.InstrumentID("INFY"),
+			TickSize:  contract.Ticks(10),
+			BandBps:   750,
+			SeedPrice: contract.Ticks(150000),
+		},
+	}
+	// Construct-time anchor NOT aligned to any session open — proves the
+	// helper does not reach back to a schedule.
+	openInstant := time.Date(2026, 10, 12, 11, 23, 47, 0, time.UTC)
+	const storedCloseReliance int64 = 251575
+	const storedCloseInfy int64 = 151200
+	// Two sequential QueryRow calls — first returns reliance close, second
+	// returns infy close. fakeCandleReader has one canned row; stage it to
+	// return each in order.
+	type stagedReader struct {
+		fakeCandleReader
+		queue []fakeCandleRow
+	}
+	reader := &stagedReader{queue: []fakeCandleRow{
+		{closePrice: storedCloseReliance},
+		{closePrice: storedCloseInfy},
+	}}
+	queryRow := func(ctx context.Context, sql string, args ...any) pgx.Row {
+		row := reader.queue[0]
+		reader.queue = reader.queue[1:]
+		reader.calls++
+		reader.lastSQL = sql
+		reader.lastArgs = args
+		return row
+	}
+	wrapper := candleReaderFn(queryRow)
+
+	specs, err := buildInstrumentSpecs(
+		context.Background(), wrapper, instruments, MarketTag("IN"), time.Minute, openInstant,
+	)
+	if err != nil {
+		t.Fatalf("buildInstrumentSpecs: %v", err)
+	}
+	if len(specs) != 2 {
+		t.Fatalf("specs count = %d, want 2", len(specs))
+	}
+
+	expected := []struct {
+		instrument contract.InstrumentID
+		reference  contract.Ticks
+		band       int
+		tickSize   contract.Ticks
+	}{
+		{"RELIANCE", contract.Ticks(storedCloseReliance), 1000, contract.Ticks(5)},
+		{"INFY", contract.Ticks(storedCloseInfy), 750, contract.Ticks(10)},
+	}
+	for specIndex, want := range expected {
+		got := specs[specIndex]
+		if got.Instrument != want.instrument {
+			t.Errorf("specs[%d].Instrument = %q, want %q", specIndex, got.Instrument, want.instrument)
+		}
+		if got.Reference != want.reference {
+			t.Errorf("specs[%d].Reference = %d, want %d", specIndex, got.Reference, want.reference)
+		}
+		if got.BandBps != want.band {
+			t.Errorf("specs[%d].BandBps = %d, want %d", specIndex, got.BandBps, want.band)
+		}
+		if got.Rules.TickSize != want.tickSize {
+			t.Errorf("specs[%d].Rules.TickSize = %d, want %d", specIndex, got.Rules.TickSize, want.tickSize)
+		}
+		if got.OHLCVInterval != time.Minute {
+			t.Errorf("specs[%d].OHLCVInterval = %v, want 1m", specIndex, got.OHLCVInterval)
+		}
+		if !got.OHLCVStart.Equal(openInstant) {
+			t.Errorf("specs[%d].OHLCVStart = %s, want openInstant %s", specIndex, got.OHLCVStart, openInstant)
+		}
+	}
+}
+
+// TestBuildInstrumentSpecs_SeedPriceFallbackOnNoRow proves the helper
+// alone (no surrounding schedule) treats a missing prior candle as a
+// seed-price fallback, matching the behavior canonical bring-up
+// depends on for a brand-new instrument's first-ever session.
+func TestBuildInstrumentSpecs_SeedPriceFallbackOnNoRow(t *testing.T) {
+	instruments := []InstrumentConfig{
+		{ID: contract.InstrumentID("NEWLISTING"), TickSize: 1, BandBps: 500, SeedPrice: contract.Ticks(99999)},
+	}
+	specs, err := buildInstrumentSpecs(
+		context.Background(),
+		readerReturningNoRow(),
+		instruments, MarketTag("IN"), time.Minute,
+		time.Date(2026, 10, 12, 11, 0, 0, 0, time.UTC),
+	)
+	if err != nil {
+		t.Fatalf("buildInstrumentSpecs on no-row: %v", err)
+	}
+	if specs[0].Reference != contract.Ticks(99999) {
+		t.Errorf("Reference = %d, want seed price 99999", specs[0].Reference)
+	}
+}
+
+// TestBuildInstrumentSpecs_ReferenceReadError_Bubbles proves the
+// helper short-circuits on the first database error and wraps it
+// enough to identify the offending instrument.
+func TestBuildInstrumentSpecs_ReferenceReadError_Bubbles(t *testing.T) {
+	driverFailure := errors.New("connection reset by peer")
+	reader := &fakeCandleReader{returnRow: fakeCandleRow{scanErr: driverFailure}}
+	instruments := []InstrumentConfig{
+		{ID: contract.InstrumentID("RELIANCE"), TickSize: 5, BandBps: 1000, SeedPrice: 250000},
+		{ID: contract.InstrumentID("INFY"), TickSize: 10, BandBps: 750, SeedPrice: 150000},
+	}
+	specs, err := buildInstrumentSpecs(
+		context.Background(), reader, instruments, MarketTag("IN"), time.Minute,
+		time.Date(2026, 10, 12, 11, 0, 0, 0, time.UTC),
+	)
+	if err == nil {
+		t.Fatal("expected error on reference read failure")
+	}
+	if !errors.Is(err, driverFailure) {
+		t.Errorf("error does not wrap driver failure: %v", err)
+	}
+	if specs != nil {
+		t.Errorf("specs non-nil on error: %v", specs)
+	}
+	// Short-circuit: reader was called exactly once (for RELIANCE), not
+	// twice. The second instrument's lookup must not have fired.
+	if reader.calls != 1 {
+		t.Errorf("reader.calls = %d, want 1 (short-circuit on first error)", reader.calls)
+	}
+}
+
+// candleReaderFn adapts a bare function value to the candleReader
+// interface — lets the staged-reader test above write its QueryRow
+// behavior inline without defining a whole fake type.
+type candleReaderFn func(ctx context.Context, sql string, args ...any) pgx.Row
+
+func (fn candleReaderFn) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
+	return fn(ctx, sql, args...)
+}
+
+// --- phase label helper -----------------------------------------------
+
 func TestPhaseFromConfigLabel_AcceptsThreeLabels(t *testing.T) {
 	cases := map[string]clock.Phase{
 		phaseLabelContinuous:     clock.PhaseContinuous,
