@@ -162,22 +162,62 @@ func buildExchangeArgs(
 	openInstant = boundaries[0].At
 	closeInstant = boundaries[len(boundaries)-1].At
 
-	specs = make([]wire.InstrumentSpec, 0, len(marketConfig.Instruments))
-	for _, instrumentConfig := range marketConfig.Instruments {
-		reference, referenceErr := readReference(ctx, reader, marketConfig.Market, instrumentConfig)
+	specs, specsErr := buildInstrumentSpecs(
+		ctx, reader,
+		marketConfig.Instruments,
+		marketConfig.Market,
+		marketConfig.OHLCVInterval,
+		openInstant,
+	)
+	if specsErr != nil {
+		return 0, clock.SessionSchedule{}, nil, time.Time{}, time.Time{}, specsErr
+	}
+
+	return numShards, clock.SessionSchedule{Boundaries: boundaries}, specs, openInstant, closeInstant, nil
+}
+
+// buildInstrumentSpecs assembles the per-instrument wire.InstrumentSpec
+// list the exchange constructor consumes. For each configured
+// instrument it resolves the reference price (prior close for the
+// market tag, seed price when no prior candle exists) and stamps the
+// exchange-level fields (band, tick size, OHLCV cadence + session
+// anchor) onto the spec.
+//
+// Pure in the sense that it reads from the injected candleReader but
+// writes nothing anywhere. Callers:
+//
+//   - buildExchangeArgs (canonical bring-up) passes the first-boundary
+//     instant as openInstant — the session's wall-clock open in the
+//     market's own timezone.
+//   - the on-demand bring-up flow passes the construct-time instant as
+//     openInstant — the single continuous phase starts there, so every
+//     instrument's OHLCV series is anchored to that same T0.
+//
+// The reference-read loop short-circuits on the first lookup error so
+// a flaky database aborts the whole build without issuing further
+// queries; the error wraps the offending instrument id for logging.
+func buildInstrumentSpecs(
+	ctx context.Context,
+	reader candleReader,
+	instruments []InstrumentConfig,
+	marketTag MarketTag,
+	ohlcvInterval time.Duration,
+	openInstant time.Time,
+) ([]wire.InstrumentSpec, error) {
+	specs := make([]wire.InstrumentSpec, 0, len(instruments))
+	for _, instrumentConfig := range instruments {
+		reference, referenceErr := readReference(ctx, reader, marketTag, instrumentConfig)
 		if referenceErr != nil {
-			return 0, clock.SessionSchedule{}, nil, time.Time{}, time.Time{},
-				fmt.Errorf("conductor: buildExchangeArgs: reference for %s: %w", instrumentConfig.ID, referenceErr)
+			return nil, fmt.Errorf("conductor: buildInstrumentSpecs: reference for %s: %w", instrumentConfig.ID, referenceErr)
 		}
 		specs = append(specs, wire.InstrumentSpec{
 			Instrument:    instrumentConfig.ID,
 			Reference:     reference,
 			BandBps:       instrumentConfig.BandBps,
 			Rules:         gate.Rulebook{TickSize: instrumentConfig.TickSize},
-			OHLCVInterval: marketConfig.OHLCVInterval,
+			OHLCVInterval: ohlcvInterval,
 			OHLCVStart:    openInstant,
 		})
 	}
-
-	return numShards, clock.SessionSchedule{Boundaries: boundaries}, specs, openInstant, closeInstant, nil
+	return specs, nil
 }
