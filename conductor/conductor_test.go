@@ -193,6 +193,29 @@ func TestNewConductor_BringUpTimeoutDefaultsAndOverrides(t *testing.T) {
 	}
 }
 
+func TestNewConductor_SetupTimeoutDefaultsAndOverrides(t *testing.T) {
+	pool := newUnconnectedPool(t)
+	defer pool.Close()
+
+	defaultedConductor, err := NewConductor(newTestConfig(t, pool))
+	if err != nil {
+		t.Fatalf("NewConductor default: %v", err)
+	}
+	if defaultedConductor.setupTimeout != DefaultSetupTimeout {
+		t.Errorf("default setupTimeout = %v, want %v", defaultedConductor.setupTimeout, DefaultSetupTimeout)
+	}
+
+	overriddenCfg := newTestConfig(t, pool)
+	overriddenCfg.SetupTimeout = 7 * time.Second
+	overriddenConductor, err := NewConductor(overriddenCfg)
+	if err != nil {
+		t.Fatalf("NewConductor override: %v", err)
+	}
+	if overriddenConductor.setupTimeout != 7*time.Second {
+		t.Errorf("overridden setupTimeout = %v, want 7s", overriddenConductor.setupTimeout)
+	}
+}
+
 func TestConductor_StartStop(t *testing.T) {
 	pool := newUnconnectedPool(t)
 	// Not deferring pool.Close — Conductor.Stop closes it.
