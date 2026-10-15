@@ -19,16 +19,30 @@ type JoinResult struct {
 	ParticipantID ParticipantID
 }
 
-// JoinCanonical admits one user into one live canonical market. The flow
-// is fast + blocking because the market is already Live — there is no
-// market-open wait. Three phases, with the one registry mutex taken
-// exactly twice and never across a broker call-out:
+// JoinCanonical admits one user into one live canonical market. The door
+// is idempotent: a user whose existing session is already Active on this
+// same market is treated as a reconnect and returned the existing
+// identifiers verbatim, no broker I/O. First join, rejoin-after-leave,
+// and reconnect-after-reload all enter here.
+//
+// Three phases, with the one registry mutex taken exactly twice and
+// never across a broker call-out:
 //
 //  1. reserve (locked, microseconds): resolve the Live canonical market
-//     for the tag, enforce the per-user front-gate, and reserve a
-//     Starting Session record. The Starting record itself IS the
-//     reservation — a second concurrent trigger for the same user is
-//     refused here (ErrAlreadyInSession) without any broker I/O.
+//     for the tag. Then check the per-user slot:
+//
+//       - same market + Active  → RECONNECT: snapshot the existing
+//         {SessionID, ParticipantID} and return. Zero broker calls, zero
+//         registry mutations. The frontend can lose its session_id (full
+//         reload) and re-trigger join without penalty.
+//       - different market, or same market in Starting / Stopping →
+//         ErrLiveElsewhere. The user is live elsewhere or in a
+//         transient state the door refuses to overwrite.
+//       - no existing session → fall through to the fresh-join reserve.
+//
+//     The fresh-join reserve writes a Starting Session record that IS
+//     the reservation — a second concurrent trigger for the same user
+//     is caught by the same slot check without any broker I/O.
 //
 //  2. slow work (off-lock): EnsureAccount (one durable upsert round-trip)
 //     then StartSession (one shard round-trip plus the account's load
@@ -47,7 +61,8 @@ type JoinResult struct {
 // Returns JoinResult{SessionID, ParticipantID} on success. Error paths:
 //
 //   - ErrMarketNotLive       — no Live canonical market for tag.
-//   - ErrAlreadyInSession    — the user already holds a session.
+//   - ErrLiveElsewhere       — user is live on a different market, or
+//     has a transient session on this market.
 //   - wrapped broker error   — any EnsureAccount or StartSession failure,
 //     surfaced with fmt.Errorf("…: %w", err) so joinStatusFor can
 //     classify it with errors.Is.
@@ -68,13 +83,37 @@ func (conductor *Conductor) JoinCanonical(ctx context.Context, userID UserID, ta
 		)
 		return JoinResult{}, ErrMarketNotLive
 	}
-	if _, alreadyPresent := conductor.reg.byUser[userID]; alreadyPresent {
+	// Per-user slot check. A same-market Active hit is a reconnect — the
+	// frontend may have lost local state after a full reload; return the
+	// existing identifiers verbatim with zero broker I/O. Any other hit
+	// (different market, or same market in a transient state) is a hard
+	// refusal: the door never overwrites a live binding.
+	if existingSession := conductor.reg.byUser[userID]; existingSession != nil {
+		// Snapshot the fields BEFORE releasing reg.mu — the Session is
+		// owner-written under the mutex, so a read after unlock would
+		// race any concurrent finalize touching the same record.
+		existingMarket := existingSession.Market
+		existingState := existingSession.State
+		existingSessionID := existingSession.ID
+		existingParticipantID := existingSession.Participant
+		if existingMarket == liveMarket.ID && existingState == Active {
+			conductor.reg.mu.Unlock()
+			conductor.log.Info("conductor: JoinCanonical reconnect — returning existing session",
+				"user", userID,
+				"tag", tag,
+				"session_id", existingSessionID,
+				"participant_id", existingParticipantID,
+			)
+			return JoinResult{SessionID: existingSessionID, ParticipantID: existingParticipantID}, nil
+		}
 		conductor.reg.mu.Unlock()
-		conductor.log.Info("conductor: JoinCanonical rejected — user already in session",
+		conductor.log.Info("conductor: JoinCanonical rejected — user live elsewhere or transient",
 			"user", userID,
 			"tag", tag,
+			"existing_market", existingMarket,
+			"existing_state", existingState,
 		)
-		return JoinResult{}, ErrAlreadyInSession
+		return JoinResult{}, ErrLiveElsewhere
 	}
 	sessionID := SessionID(newUUIDv4())
 	reservedSession := &Session{
