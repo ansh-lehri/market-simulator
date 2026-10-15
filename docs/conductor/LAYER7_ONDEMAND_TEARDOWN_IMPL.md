@@ -28,14 +28,21 @@ Explicit exit (exit endpoint, on-demand branch) and duration timeout (the reap t
 
 One short-lived goroutine per on-demand session (T3.14, Option 1 — per-session, not a shared reaper), spawned at the end of on-demand spin-up, armed to m.closeAt (= session_ends_at = T0 + warmupLen + duration from the on-demand spin-up doc) — not "ondemand.duration from now," so the warm-up window is counted.
 
-spawnOnDemandReap(marketID, closeAt):             // added to the on-demand spin-up finalize
+spawnOnDemandReaper(marketID, closeAt):             // added to the on-demand spin-up finalize
+    conductor.wg.Add(1)
     go func():
-        timer := NewTimer(closeAt - now())
-        select:
-          case <-timer.C:        shapeC_teardown(marketID)     // duration elapsed
-          case <-conductorQuit:  timer.Stop(); return          // process shutdown
-    // if the user exits first, shapeC runs via the exit path; this timer firing after is a
-    // safe no-op (TearingDown flip). The goroutine ends when shapeC completes or the timer fires.
+        defer conductor.wg.Done()
+        delay := closeAt - conductor.now()                 // armed off closeAt, NOT "duration from now"
+        if !sleepOrQuit(delay):                            // selects timer.C vs conductor.timerQuit
+            return                                         // process shutdown signal received
+        tearDownOnDemandInstance(marketID)                 // duration elapsed → fire the teardown body
+    // if the user exits first, the teardown runs via the exit path; this reaper firing after is
+    // a safe no-op (Market.State == TearingDown or market gone from the registry). The goroutine
+    // ends when sleepOrQuit returns true (timer fired) or false (timerQuit closed).
+    //
+    // The shutdown signal channel is conductor.timerQuit (shared with the canonical timer loop)
+    // — allocated at NewConductor so a Stop() that drains reaper goroutines works even for
+    // flows (StartOnDemand) that spawn goroutines without going through Start().
 
 Cross-doc: the on-demand spin-up doc's finalize gains this spawnOnDemandReap(marketID, m.closeAt) call (it previously computed m.closeAt but spawned no reaper — Tier 3 adds it). At m.closeAt the exchange clock also hits PhaseClosed, which does not stop the instance — L7's reap timer is what tears it down via exch.Stop().
 
@@ -79,21 +86,25 @@ No FinalizeMarket, no market→accounts sweep, no auto-square for on-demand — 
 
 The shared exit handler (canonical doc §4/§5) branches on mode; on-demand is a straight Shape C:
 
-POST /session/{sessionID}/exit          // handleExit — on-demand branch
+POST /session/exit?session=<sid>        // handleSessionExit — on-demand branch
   defer recoverPanic
-  lock: sess := sessions[sid] ; nil → unlock → 404 ; m := markets[sess.Market] ; mode := m.Mode ; marketID := m.ID
+  lock: sess := sessions[sid] ; nil → canonical fall-through (returns 404 at ErrSessionNotFound)
+        m := markets[sess.Market] ; mode := m.Mode ; marketID := m.ID
   unlock
   if mode == OnDemand:
-     shapeC_teardown(marketID)           // flip is inside; race-safe with the reap timer
-     → 200 { ok }                        // idempotent: if the timer already tore it down, flip no-ops, still ok
+     exitOnDemandSession(ctx, sid)       // resolves sid→marketID, invokes tearDownOnDemandInstance
+     → 200 { "status": "ended" }         // forward-progress: teardown body log+proceeds on any
+                                         // sub-call error, so the only non-200 is a preflight miss
 
-Status table — /session/{id}/exit (on-demand):
+Status table — /session/exit?session=<sid> (on-demand):
 
 Condition	Status
-success (torn down)	200 {ok}
-unknown session	404
-already torn down (timer won the race)	200 {ok} (idempotent)
-EndSession discard err/timeout	200 {ok} + logged — forward progress always reaches Stop(); the user's intent (end it) is honored regardless
+success (torn down)	200 {status:"ended"}
+unknown session (preflight resolves no session for sid)	404
+already torn down (reaper won — session gone from registry at preflight)	404 (preflight-honest)
+EndSession discard err/timeout	200 {status:"ended"} + logged — forward progress always reaches Stop(); the user's intent (end it) is honored regardless
+
+The "already torn down" status is 404, not 200. Reasoning: the reaper's reap deletes the session from the registry before the HTTP preflight runs, so the preflight-level resolve honestly reports "no such session" rather than fabricating an idempotent 200. The user's intent (end the session) was still honored — just by the reaper, not this call. The body's own flip (Market.State Live→TearingDown) remains idempotent for the exit-vs-reaper race inside a single teardown attempt; the 404 only appears when the race was decided on an entirely earlier trigger.
 6. Reconnect (accidental nav → the rejoin option)
 
 Nothing torn down; the od:<sid> instance is still live (agents trading into its single-subscriber FanOut, duration timer running). Rejoin = reconnect via the shared POST /session/current (canonical doc §6.2), which returns the on-demand timers so the UI countdown resumes:
@@ -117,6 +128,6 @@ OT.7	Reconnect reuses POST /session/current + the /v1/ws dispatcher; returns war
 EndSession seam itself (dual-mode, shard delivery) is the broker's Tier 3 to confirm — defined in the canonical doc §3; this doc only pins its discard branch.
 WindDown/BringUp signatures change with L2 (placeholder ports).
 Server-crash recovery — a crash loses the ephemeral instance entirely (nothing persisted by design); the user starts a new on-demand. No recovery path (nor wanted).
-Spawn point — spawnOnDemandReap is an addition to the on-demand spin-up finalize; update claude/LAYER7_ONDEMAND_SPINUP_IMPL.md when implementing so the reaper is spawned there.
+Spawn point — spawnOnDemandReaper is called at the on-demand spin-up finalize (after the Live-state commit); the sibling spin-up doc pins the call site.
 
 End — on-demand teardown. Sibling: canonical teardown (shared EndSession + /session/current).

@@ -142,6 +142,16 @@ Conductor.StartOnDemand(ctx, userID, tag, durMin) -> (Result, error):
       m.warmupEndsAt = T0 + warmupLen ; m.closeAt = T0 + warmupLen + minutes(durMin) ; m.State = Live
       sess.Participant = participant ; sess.State = Active
     reg.mu.Unlock()
+
+    // After the Live flip + closeAt commit, spawn the per-session reaper
+    // that fires the on-demand teardown when wall-clock reaches closeAt.
+    // Pinned here because a reaper spawned before the commit would race
+    // the lock-take that stamps closeAt onto the market record. The
+    // reaper registers on conductor.wg so Conductor.Stop drains it on
+    // shutdown. Full teardown shape is covered by the on-demand teardown
+    // doc; this is only the spawn-point pin.
+    spawnOnDemandReaper(marketID, m.closeAt)
+
     return WarmingUp{SessionID: sid, WarmupEndsAt: m.warmupEndsAt, SessionEndsAt: m.closeAt}, nil
 
 rollbackDelete(sid, userID):                 // gate-fail / pre-setup: nothing built yet
