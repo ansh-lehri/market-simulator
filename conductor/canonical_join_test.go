@@ -247,28 +247,111 @@ func TestJoinCanonical_HappyPath(t *testing.T) {
 	}
 }
 
-// --- JoinCanonical: per-user XOR front-gate --------------------------
+// --- JoinCanonical: idempotent same-market reconnect ----------------
 
-func TestJoinCanonical_XORFrontGate(t *testing.T) {
+// A second call for the same {user, market} with an Active session is a
+// reconnect — the door returns the existing identifiers verbatim with
+// zero broker I/O. The frontend may have lost its session_id (full page
+// reload) and must be able to re-trigger join without penalty.
+func TestJoinCanonical_SameUserSameMarket_Reconnects(t *testing.T) {
 	conductor, broker := newJoinHarness(t)
 	installLiveCanonicalMarket(t, conductor, "IN")
 	userID := UserID("human-42")
 
-	if _, err := conductor.JoinCanonical(context.Background(), userID, "IN"); err != nil {
-		t.Fatalf("first JoinCanonical: %v", err)
+	firstResult, firstErr := conductor.JoinCanonical(context.Background(), userID, "IN")
+	if firstErr != nil {
+		t.Fatalf("first JoinCanonical: %v", firstErr)
 	}
-	_, secondErr := conductor.JoinCanonical(context.Background(), userID, "IN")
-	if !errors.Is(secondErr, ErrAlreadyInSession) {
-		t.Fatalf("second JoinCanonical err = %v, want ErrAlreadyInSession", secondErr)
+	secondResult, secondErr := conductor.JoinCanonical(context.Background(), userID, "IN")
+	if secondErr != nil {
+		t.Fatalf("second JoinCanonical: %v (want nil, got the reconnect path)", secondErr)
 	}
 
-	// Front-gate must short-circuit before any broker I/O; the broker
+	if secondResult.SessionID != firstResult.SessionID {
+		t.Errorf("reconnect SessionID = %q, want %q (identical to first join)", secondResult.SessionID, firstResult.SessionID)
+	}
+	if secondResult.ParticipantID != firstResult.ParticipantID {
+		t.Errorf("reconnect ParticipantID = %q, want %q (identical to first join)", secondResult.ParticipantID, firstResult.ParticipantID)
+	}
+
+	// The reconnect must short-circuit before any broker I/O; the broker
 	// got exactly the one pair of calls from the first join.
 	if broker.ensureAccountCount() != 1 {
-		t.Errorf("EnsureAccount calls = %d, want 1", broker.ensureAccountCount())
+		t.Errorf("EnsureAccount calls = %d, want 1 (reconnect must not call the broker)", broker.ensureAccountCount())
 	}
 	if broker.startSessionCount() != 1 {
-		t.Errorf("StartSession calls = %d, want 1", broker.startSessionCount())
+		t.Errorf("StartSession calls = %d, want 1 (reconnect must not call the broker)", broker.startSessionCount())
+	}
+}
+
+// --- JoinCanonical: ErrLiveElsewhere branches ------------------------
+
+// A user whose byUser slot points at a session on a DIFFERENT market
+// must be refused with ErrLiveElsewhere — the door never silently
+// overwrites a live binding to swap markets.
+func TestJoinCanonical_LiveElsewhere_DifferentMarket(t *testing.T) {
+	conductor, broker := newJoinHarness(t)
+	installLiveCanonicalMarket(t, conductor, "IN")
+	installLiveCanonicalMarket(t, conductor, "US")
+	userID := UserID("human-42")
+
+	if _, err := conductor.JoinCanonical(context.Background(), userID, "IN"); err != nil {
+		t.Fatalf("first JoinCanonical on IN: %v", err)
+	}
+	ensureCallsAfterFirstJoin := broker.ensureAccountCount()
+	startCallsAfterFirstJoin := broker.startSessionCount()
+
+	_, secondErr := conductor.JoinCanonical(context.Background(), userID, "US")
+	if !errors.Is(secondErr, ErrLiveElsewhere) {
+		t.Fatalf("second JoinCanonical err = %v, want ErrLiveElsewhere", secondErr)
+	}
+	if broker.ensureAccountCount() != ensureCallsAfterFirstJoin {
+		t.Errorf("EnsureAccount delta = %d, want 0 (live-elsewhere must not call the broker)",
+			broker.ensureAccountCount()-ensureCallsAfterFirstJoin)
+	}
+	if broker.startSessionCount() != startCallsAfterFirstJoin {
+		t.Errorf("StartSession delta = %d, want 0 (live-elsewhere must not call the broker)",
+			broker.startSessionCount()-startCallsAfterFirstJoin)
+	}
+}
+
+// A user whose byUser slot points at a same-market session in a
+// transient state (Starting / Stopping) must be refused with
+// ErrLiveElsewhere — only an Active session triggers the reconnect
+// short-circuit; a transient one would be unsafe to overwrite.
+func TestJoinCanonical_LiveElsewhere_NonActiveState(t *testing.T) {
+	for _, transientState := range []SessionState{Starting, Stopping} {
+		t.Run(transientState.String(), func(t *testing.T) {
+			conductor, broker := newJoinHarness(t)
+			marketID, _ := installLiveCanonicalMarket(t, conductor, "IN")
+			userID := UserID("human-42")
+
+			// Inject a transient session for the user directly on the
+			// registry (bypass the broker fake — the point of the test
+			// is the reserve-step check, not the fresh-join broker
+			// interaction).
+			injectedSession := &Session{
+				ID:          SessionID("sid-transient"),
+				User:        userID,
+				Market:      marketID,
+				AccountType: Durable,
+				State:       transientState,
+			}
+			conductor.reg.mu.Lock()
+			conductor.reg.sessions[injectedSession.ID] = injectedSession
+			conductor.reg.byUser[userID] = injectedSession
+			conductor.reg.mu.Unlock()
+
+			_, joinErr := conductor.JoinCanonical(context.Background(), userID, "IN")
+			if !errors.Is(joinErr, ErrLiveElsewhere) {
+				t.Fatalf("JoinCanonical err = %v, want ErrLiveElsewhere (transient state %s)",
+					joinErr, transientState)
+			}
+			if broker.ensureAccountCount() != 0 || broker.startSessionCount() != 0 {
+				t.Errorf("broker was called despite transient-state reject: ensure=%d start=%d",
+					broker.ensureAccountCount(), broker.startSessionCount())
+			}
+		})
 	}
 }
 
@@ -482,44 +565,75 @@ func TestJoinCanonical_ConcurrentJoinsDistinctUsers(t *testing.T) {
 	}
 }
 
-// --- Concurrent joins by the SAME user: one wins, N-1 see front-gate.
+// --- Concurrent joins by the SAME user ------------------------------
 
+// Many goroutines race JoinCanonical for the same {user, market} from a
+// cold registry. Three outcomes are legal and all occur under race:
+//
+//   - exactly one goroutine wins the fresh-join reserve and drives the
+//     broker to install the session;
+//   - any goroutine that observes the slot while still Starting is
+//     refused with ErrLiveElsewhere (reserve-step check: not Active);
+//   - any goroutine that observes the slot after it has reached Active
+//     is reconnected and returns the winner's SessionID verbatim.
+//
+// Invariants the test locks regardless of the schedule:
+//
+//   - broker call counts: exactly 1 EnsureAccount + 1 StartSession
+//     (only the winner reaches the slow work);
+//   - every success returns the SAME SessionID (the winner's);
+//   - every non-success is ErrLiveElsewhere (no stray error paths).
 func TestJoinCanonical_ConcurrentJoinsSameUser(t *testing.T) {
 	conductor, broker := newJoinHarness(t)
 	installLiveCanonicalMarket(t, conductor, "IN")
 	userID := UserID("human-concurrent")
 
 	const numAttempts = 16
-	errorsChan := make(chan error, numAttempts)
+	type attemptOutcome struct {
+		result JoinResult
+		err    error
+	}
+	outcomesChan := make(chan attemptOutcome, numAttempts)
 	var startBarrier sync.WaitGroup
 	startBarrier.Add(1)
 	for range numAttempts {
 		go func() {
 			startBarrier.Wait()
-			_, joinErr := conductor.JoinCanonical(context.Background(), userID, "IN")
-			errorsChan <- joinErr
+			joinResult, joinErr := conductor.JoinCanonical(context.Background(), userID, "IN")
+			outcomesChan <- attemptOutcome{result: joinResult, err: joinErr}
 		}()
 	}
 	startBarrier.Done()
 
-	var wins, frontGateHits int
+	var successCount, liveElsewhereCount int
+	var winningSessionID SessionID
 	for range numAttempts {
-		switch err := <-errorsChan; {
-		case err == nil:
-			wins++
-		case errors.Is(err, ErrAlreadyInSession):
-			frontGateHits++
+		outcome := <-outcomesChan
+		switch {
+		case outcome.err == nil:
+			successCount++
+			switch {
+			case winningSessionID == "":
+				winningSessionID = outcome.result.SessionID
+			case outcome.result.SessionID != winningSessionID:
+				t.Errorf("concurrent success returned a divergent SessionID: got %q, previous winner %q",
+					outcome.result.SessionID, winningSessionID)
+			}
+		case errors.Is(outcome.err, ErrLiveElsewhere):
+			liveElsewhereCount++
 		default:
-			t.Errorf("unexpected err: %v", err)
+			t.Errorf("unexpected err: %v", outcome.err)
 		}
 	}
-	if wins != 1 {
-		t.Errorf("wins = %d, want exactly 1 (per-user XOR)", wins)
+	if successCount < 1 {
+		t.Errorf("successCount = %d, want at least 1 (one goroutine must win the reserve)", successCount)
 	}
-	if frontGateHits != numAttempts-1 {
-		t.Errorf("frontGateHits = %d, want %d", frontGateHits, numAttempts-1)
+	if successCount+liveElsewhereCount != numAttempts {
+		t.Errorf("outcome tally: success=%d liveElsewhere=%d, sum=%d want %d",
+			successCount, liveElsewhereCount, successCount+liveElsewhereCount, numAttempts)
 	}
-	// Only the one winner reached the broker.
+	// Only the one winner reached the broker; every other outcome is a
+	// reconnect or a transient-state refusal, neither of which calls out.
 	if broker.ensureAccountCount() != 1 || broker.startSessionCount() != 1 {
 		t.Errorf("broker call counts: ensure=%d start=%d, want 1 each",
 			broker.ensureAccountCount(), broker.startSessionCount())
