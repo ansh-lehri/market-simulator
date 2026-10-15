@@ -193,28 +193,6 @@ func TestHandleCanonicalExit_SessionNotActive_Returns409(t *testing.T) {
 	}
 }
 
-// --- 501 on-demand session branch ------------------------------------
-
-func TestHandleCanonicalExit_OnDemandSession_Returns501(t *testing.T) {
-	harness := newLeaveHarness(t)
-	sessionID := installActiveSession(t, harness, "human-42", "IN", OnDemand)
-
-	recorder := postExit(t, harness.conductor, http.MethodPost, sessionID)
-	if recorder.Code != http.StatusNotImplemented {
-		t.Fatalf("status = %d, want 501. body=%q", recorder.Code, recorder.Body.String())
-	}
-	// Session must stay Active — the branch refused, nothing was touched.
-	harness.conductor.reg.mu.Lock()
-	stillActive := harness.conductor.reg.sessions[sessionID].State == Active
-	harness.conductor.reg.mu.Unlock()
-	if !stillActive {
-		t.Error("on-demand session state mutated despite 501 refusal")
-	}
-	if harness.broker.endSessionCount() != 0 {
-		t.Errorf("broker.EndSession called despite 501 refusal: %d", harness.broker.endSessionCount())
-	}
-}
-
 // --- 200 happy path --------------------------------------------------
 
 func TestHandleCanonicalExit_HappyPath_ReapsAndReturns200(t *testing.T) {
@@ -465,5 +443,488 @@ func TestMountRoutes_RegistersSessionExit(t *testing.T) {
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("mux POST status = %d, want 200", response.StatusCode)
+	}
+}
+
+// =====================================================================
+// On-demand teardown tests
+// =====================================================================
+//
+// Coverage:
+//   - onDemandReaperDelay (pure) — armed off closeAt minus now, both for
+//     a fresh market and a market whose warm-up window has partially
+//     elapsed. Proves the delay is NOT "duration from now."
+//   - tearDownOnDemandInstance (body) — happy path reaps everything,
+//     unknown-market / not-Live no-ops (run-once guard), EndSession
+//     error forward-progresses to Stop + reap, FinalizeMarket is never
+//     called, two concurrent callers resolve to exactly one body run.
+//   - spawnOnDemandReaper (goroutine) — fires at closeAt, exits on
+//     timerQuit without firing, firing after a prior reap is a safe
+//     no-op.
+//   - handleSessionExit on-demand branch — happy 200, already-reaped
+//     404 (preflight-level), EndSession err still returns 200 (forward
+//     progress).
+//
+// Reuses recordingWindDownAgents / recordingExchangeHandle from
+// canonical_close_test.go (same package).
+
+// onDemandTeardownHarness extends the leaveHarness surface with the
+// agents + exchange recorders the on-demand teardown exercises. The
+// shared broker fake already supports Mode-blind EndSession recording;
+// the on-demand branch surfaces Mode=OnDemand on the recorded command.
+type onDemandTeardownHarness struct {
+	conductor *Conductor
+	broker    *fakeLeaveBroker
+	agents    *recordingWindDownAgents
+	exchange  *recordingExchangeHandle
+	nowValue  time.Time // written through newOnDemandTeardownHarness setClock
+}
+
+func newOnDemandTeardownHarness(t *testing.T) *onDemandTeardownHarness {
+	t.Helper()
+	pool := newUnconnectedPool(t)
+	t.Cleanup(pool.Close)
+	broker := &fakeLeaveBroker{}
+	agents := &recordingWindDownAgents{}
+	harness := &onDemandTeardownHarness{
+		broker:   broker,
+		agents:   agents,
+		exchange: &recordingExchangeHandle{},
+		nowValue: time.Date(2026, time.March, 15, 10, 0, 0, 0, time.UTC),
+	}
+	conductor, err := NewConductor(Config{
+		CfgDir:    t.TempDir(),
+		OHLCVPool: pool,
+		Broker:    broker,
+		Market:    stubMarketDataPort{},
+		Agents:    agents,
+		Now:       func() time.Time { return harness.nowValue },
+	})
+	if err != nil {
+		t.Fatalf("NewConductor: %v", err)
+	}
+	// timerQuit is normally allocated by Conductor.Start. For reaper
+	// tests we allocate it directly so the reaper's sleepOrQuit selects
+	// a real channel rather than falling into the nil-chan "never
+	// fires" branch.
+	conductor.timerQuit = make(chan struct{})
+	harness.conductor = conductor
+	return harness
+}
+
+// installActiveOnDemandInstance seats a Live on-demand market with one
+// Active session member and the harness's recording exchange handle
+// stamped on Market.exch. Returns the (sessionID, marketID).
+func installActiveOnDemandInstance(
+	t *testing.T,
+	harness *onDemandTeardownHarness,
+	userID UserID,
+	tag MarketTag,
+	closeAt time.Time,
+) (SessionID, MarketID) {
+	t.Helper()
+	sessionID := SessionID("od-sid-" + string(userID))
+	marketID := MarketID("od:" + string(sessionID))
+	market := &Market{
+		ID:           marketID,
+		Mode:         OnDemand,
+		Tag:          tag,
+		State:        Live,
+		exch:         harness.exchange,
+		closeAt:      closeAt,
+		warmupEndsAt: closeAt.Add(-5 * time.Minute), // positive warm-up for realism; untested here
+		members:      map[SessionID]struct{}{sessionID: {}},
+	}
+	session := &Session{
+		ID:          sessionID,
+		User:        userID,
+		Market:      marketID,
+		Account:     AccountID("od-acc-" + string(userID)),
+		AccountType: Ephemeral,
+		Participant: ParticipantID("od-pid-" + string(userID)),
+		State:       Active,
+	}
+	harness.conductor.reg.mu.Lock()
+	harness.conductor.reg.markets[marketID] = market
+	harness.conductor.reg.sessions[sessionID] = session
+	harness.conductor.reg.byUser[userID] = session
+	harness.conductor.reg.mu.Unlock()
+	return sessionID, marketID
+}
+
+// --- pure delay helper ------------------------------------------------
+
+func TestOnDemandReaperDelay_FreshMarket_IsFullCloseAtMinusNow(t *testing.T) {
+	constructInstant := time.Date(2026, time.March, 15, 10, 0, 0, 0, time.UTC)
+	closeAt := constructInstant.Add(90 * time.Second) // 5s warm-up + 85s session, e.g.
+	gotDelay := onDemandReaperDelay(constructInstant, closeAt)
+	wantDelay := 90 * time.Second
+	if gotDelay != wantDelay {
+		t.Errorf("onDemandReaperDelay(now=%v, closeAt=%v) = %v, want %v", constructInstant, closeAt, gotDelay, wantDelay)
+	}
+}
+
+// A reaper spawned mid-warm-up (e.g. after a slow finalize) must sleep
+// for closeAt - now, NOT for the configured session duration. This is
+// the specification's "armed off m.closeAt, not duration from now."
+func TestOnDemandReaperDelay_PartiallyElapsed_StillClosesAtMinusNow(t *testing.T) {
+	constructInstant := time.Date(2026, time.March, 15, 10, 0, 0, 0, time.UTC)
+	closeAt := constructInstant.Add(90 * time.Second)
+	nowMidWarmup := constructInstant.Add(30 * time.Second)
+	gotDelay := onDemandReaperDelay(nowMidWarmup, closeAt)
+	wantDelay := 60 * time.Second
+	if gotDelay != wantDelay {
+		t.Errorf("onDemandReaperDelay(now=T0+30s, closeAt=T0+90s) = %v, want %v (NOT the session duration from now)", gotDelay, wantDelay)
+	}
+}
+
+// closeAt already in the past (e.g. reaper spawned after a long
+// finalize + context switch) must return a non-positive delay so
+// sleepOrQuit's "immediate fire" branch runs.
+func TestOnDemandReaperDelay_PastCloseAt_NonPositive(t *testing.T) {
+	constructInstant := time.Date(2026, time.March, 15, 10, 0, 0, 0, time.UTC)
+	closeAt := constructInstant.Add(-5 * time.Second)
+	gotDelay := onDemandReaperDelay(constructInstant, closeAt)
+	if gotDelay > 0 {
+		t.Errorf("onDemandReaperDelay(past closeAt) = %v, want <= 0", gotDelay)
+	}
+}
+
+// --- tearDownOnDemandInstance body -----------------------------------
+
+// Happy path: EndSession called once with Mode=OnDemand, WindDown
+// called once with the tag + OnDemand, exchange.Stop called once, every
+// registry map entry for the market + its member session gone.
+func TestTearDownOnDemandInstance_HappyPath_ReapsAndCallsEndSessionWindDownStop(t *testing.T) {
+	harness := newOnDemandTeardownHarness(t)
+	closeAt := harness.nowValue.Add(time.Minute)
+	sessionID, marketID := installActiveOnDemandInstance(t, harness, "u1", "IN", closeAt)
+
+	harness.conductor.tearDownOnDemandInstance(context.Background(), marketID)
+
+	if harness.broker.endSessionCount() != 1 {
+		t.Errorf("EndSession calls = %d, want 1", harness.broker.endSessionCount())
+	}
+	gotCmd := harness.broker.lastEndSessionCmd()
+	if gotCmd.Mode != lifecycle.OnDemand {
+		t.Errorf("EndSession Mode = %v, want OnDemand", gotCmd.Mode)
+	}
+	if string(gotCmd.SessionID) != string(sessionID) {
+		t.Errorf("EndSession SessionID = %q, want %q", gotCmd.SessionID, sessionID)
+	}
+	if harness.agents.windDownCallCount() != 1 {
+		t.Errorf("WindDown calls = %d, want 1", harness.agents.windDownCallCount())
+	}
+	windDowns := harness.agents.windDownCallsSnapshot()
+	if len(windDowns) == 1 && (windDowns[0].Market != "IN" || windDowns[0].Mode != OnDemand) {
+		t.Errorf("WindDown call = {Market:%q, Mode:%v}, want {IN, OnDemand}", windDowns[0].Market, windDowns[0].Mode)
+	}
+	if harness.exchange.stopCount.Load() != 1 {
+		t.Errorf("exchange.Stop calls = %d, want 1", harness.exchange.stopCount.Load())
+	}
+
+	harness.conductor.reg.mu.Lock()
+	_, sessionPresent := harness.conductor.reg.sessions[sessionID]
+	_, marketPresent := harness.conductor.reg.markets[marketID]
+	_, byUserPresent := harness.conductor.reg.byUser["u1"]
+	harness.conductor.reg.mu.Unlock()
+	if sessionPresent {
+		t.Error("session still present after teardown")
+	}
+	if marketPresent {
+		t.Error("market still present after teardown")
+	}
+	if byUserPresent {
+		t.Error("byUser still present after teardown")
+	}
+}
+
+// Teardown against a market that was never registered → no body, no
+// call-outs. Covers the reaper firing after an exit already reaped.
+func TestTearDownOnDemandInstance_UnknownMarket_NoOp(t *testing.T) {
+	harness := newOnDemandTeardownHarness(t)
+	harness.conductor.tearDownOnDemandInstance(context.Background(), MarketID("od:does-not-exist"))
+
+	if harness.broker.endSessionCount() != 0 {
+		t.Errorf("EndSession calls = %d, want 0", harness.broker.endSessionCount())
+	}
+	if harness.agents.windDownCallCount() != 0 {
+		t.Errorf("WindDown calls = %d, want 0", harness.agents.windDownCallCount())
+	}
+	if harness.exchange.stopCount.Load() != 0 {
+		t.Errorf("Stop calls = %d, want 0", harness.exchange.stopCount.Load())
+	}
+}
+
+// Market exists but is already TearingDown (losing racer in exit-vs-
+// reaper race) → run-once guard fires, body skipped.
+func TestTearDownOnDemandInstance_NotLive_RunOnceGuard(t *testing.T) {
+	harness := newOnDemandTeardownHarness(t)
+	closeAt := harness.nowValue.Add(time.Minute)
+	_, marketID := installActiveOnDemandInstance(t, harness, "u1", "IN", closeAt)
+	harness.conductor.reg.mu.Lock()
+	harness.conductor.reg.markets[marketID].State = TearingDown
+	harness.conductor.reg.mu.Unlock()
+
+	harness.conductor.tearDownOnDemandInstance(context.Background(), marketID)
+
+	if harness.broker.endSessionCount() != 0 {
+		t.Errorf("EndSession calls = %d, want 0 (already TearingDown)", harness.broker.endSessionCount())
+	}
+	if harness.exchange.stopCount.Load() != 0 {
+		t.Errorf("Stop calls = %d, want 0 (already TearingDown)", harness.exchange.stopCount.Load())
+	}
+}
+
+// EndSession returns an error (e.g. shard reports Redis delete failure
+// wrapped as ErrDiscardFailed). The teardown must still call WindDown,
+// Stop, and reap — forward-progress contract.
+func TestTearDownOnDemandInstance_EndSessionErr_ForwardProgresses(t *testing.T) {
+	harness := newOnDemandTeardownHarness(t)
+	harness.broker.endSessionFunc = func(ctx context.Context, cmd funnel.SessionEndCmd) error {
+		return errors.New("scripted discard failure")
+	}
+	closeAt := harness.nowValue.Add(time.Minute)
+	sessionID, marketID := installActiveOnDemandInstance(t, harness, "u1", "IN", closeAt)
+
+	harness.conductor.tearDownOnDemandInstance(context.Background(), marketID)
+
+	if harness.broker.endSessionCount() != 1 {
+		t.Errorf("EndSession attempts = %d, want 1", harness.broker.endSessionCount())
+	}
+	if harness.agents.windDownCallCount() != 1 {
+		t.Error("WindDown skipped after EndSession error — forward-progress contract violated")
+	}
+	if harness.exchange.stopCount.Load() != 1 {
+		t.Error("exchange.Stop skipped after EndSession error — forward-progress contract violated")
+	}
+	harness.conductor.reg.mu.Lock()
+	_, sessionPresent := harness.conductor.reg.sessions[sessionID]
+	_, marketPresent := harness.conductor.reg.markets[marketID]
+	harness.conductor.reg.mu.Unlock()
+	if sessionPresent || marketPresent {
+		t.Error("registry not reaped after EndSession error — forward-progress contract violated")
+	}
+}
+
+// FinalizeMarket is a canonical-close concept and must NEVER be called
+// from the on-demand teardown — the ephemeral account is discarded
+// wholesale, not swept + persisted.
+func TestTearDownOnDemandInstance_NeverCallsFinalizeMarket(t *testing.T) {
+	harness := newOnDemandTeardownHarness(t)
+	closeAt := harness.nowValue.Add(time.Minute)
+	_, marketID := installActiveOnDemandInstance(t, harness, "u1", "IN", closeAt)
+
+	harness.conductor.tearDownOnDemandInstance(context.Background(), marketID)
+
+	if harness.broker.finalizeMarketCalls() != 0 {
+		t.Errorf("FinalizeMarket calls = %d, want 0 (on-demand never finalizes)", harness.broker.finalizeMarketCalls())
+	}
+}
+
+// Exit-vs-reaper race: two goroutines call the body concurrently. The
+// mutex-held flip resolves to exactly one body run; the loser observes
+// TearingDown and no-ops. Only one EndSession, one WindDown, one Stop.
+func TestTearDownOnDemandInstance_ExitVsReaperRace_RunsBodyExactlyOnce(t *testing.T) {
+	harness := newOnDemandTeardownHarness(t)
+	closeAt := harness.nowValue.Add(time.Minute)
+	_, marketID := installActiveOnDemandInstance(t, harness, "u1", "IN", closeAt)
+
+	// Prolong the OFF-LOCK region slightly so both goroutines reliably
+	// enter the body window — without this the first caller might
+	// finish before the second even starts. 20ms is comfortable under
+	// -race.
+	harness.broker.endSessionFunc = func(ctx context.Context, cmd funnel.SessionEndCmd) error {
+		time.Sleep(20 * time.Millisecond)
+		return nil
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		harness.conductor.tearDownOnDemandInstance(context.Background(), marketID)
+	}()
+	go func() {
+		defer wg.Done()
+		harness.conductor.tearDownOnDemandInstance(context.Background(), marketID)
+	}()
+	wg.Wait()
+
+	if harness.broker.endSessionCount() != 1 {
+		t.Errorf("EndSession calls = %d, want 1 (exactly one body run under race)", harness.broker.endSessionCount())
+	}
+	if harness.agents.windDownCallCount() != 1 {
+		t.Errorf("WindDown calls = %d, want 1", harness.agents.windDownCallCount())
+	}
+	if harness.exchange.stopCount.Load() != 1 {
+		t.Errorf("Stop calls = %d, want 1", harness.exchange.stopCount.Load())
+	}
+}
+
+// --- spawnOnDemandReaper goroutine -----------------------------------
+
+// Reaper armed with closeAt a short delay in the future fires
+// tearDownOnDemandInstance. Observes the fire via the recording stops.
+// Uses real wall-clock for the Timer wait, with the injected `now`
+// pinned at test start so the delay computation is deterministic.
+func TestSpawnOnDemandReaper_FiresAtCloseAt(t *testing.T) {
+	harness := newOnDemandTeardownHarness(t)
+	// closeAt 50ms from the harness's pinned now. The reaper computes
+	// delay off conductor.now(), which returns harness.nowValue; the
+	// Timer then waits that real wall-clock interval.
+	closeAt := harness.nowValue.Add(50 * time.Millisecond)
+	_, marketID := installActiveOnDemandInstance(t, harness, "u1", "IN", closeAt)
+
+	harness.conductor.spawnOnDemandReaper(marketID, closeAt)
+	harness.conductor.wg.Wait()
+
+	if harness.broker.endSessionCount() != 1 {
+		t.Errorf("EndSession calls = %d, want 1 (reaper fire)", harness.broker.endSessionCount())
+	}
+	if harness.exchange.stopCount.Load() != 1 {
+		t.Errorf("Stop calls = %d, want 1", harness.exchange.stopCount.Load())
+	}
+	harness.conductor.reg.mu.Lock()
+	_, marketPresent := harness.conductor.reg.markets[marketID]
+	harness.conductor.reg.mu.Unlock()
+	if marketPresent {
+		t.Error("market not reaped after reaper fire")
+	}
+}
+
+// Reaper armed with a closeAt well in the future, timerQuit closes
+// before the Timer fires → reaper exits cleanly, no teardown call-outs.
+// Proves conductor.Stop drains outstanding reapers.
+func TestSpawnOnDemandReaper_ExitsOnTimerQuit(t *testing.T) {
+	harness := newOnDemandTeardownHarness(t)
+	closeAt := harness.nowValue.Add(10 * time.Second) // long — ensures Quit wins
+	_, marketID := installActiveOnDemandInstance(t, harness, "u1", "IN", closeAt)
+
+	harness.conductor.spawnOnDemandReaper(marketID, closeAt)
+
+	// Close timerQuit directly; the harness bypassed Start so Stop's
+	// stopOnce path isn't armed. Close is the shutdown signal the
+	// shipped sleepOrQuit selects on.
+	close(harness.conductor.timerQuit)
+	harness.conductor.wg.Wait()
+
+	if harness.broker.endSessionCount() != 0 {
+		t.Errorf("EndSession calls = %d, want 0 (reaper exited on shutdown)", harness.broker.endSessionCount())
+	}
+	if harness.exchange.stopCount.Load() != 0 {
+		t.Errorf("Stop calls = %d, want 0 (reaper exited on shutdown)", harness.exchange.stopCount.Load())
+	}
+}
+
+// Reaper fires after another path (an explicit exit) already reaped
+// the market. The body's "nil market" guard turns the fire into a safe
+// no-op — no panic, no second Stop call.
+func TestSpawnOnDemandReaper_FireAfterReap_SafeNoOp(t *testing.T) {
+	harness := newOnDemandTeardownHarness(t)
+	closeAt := harness.nowValue.Add(30 * time.Millisecond)
+	_, marketID := installActiveOnDemandInstance(t, harness, "u1", "IN", closeAt)
+
+	// Explicit exit happens first, before the reaper fires.
+	harness.conductor.tearDownOnDemandInstance(context.Background(), marketID)
+	preReapEndSessions := harness.broker.endSessionCount()
+	preReapStops := harness.exchange.stopCount.Load()
+
+	harness.conductor.spawnOnDemandReaper(marketID, closeAt)
+	harness.conductor.wg.Wait()
+
+	if harness.broker.endSessionCount() != preReapEndSessions {
+		t.Errorf("EndSession calls after reaper late-fire = %d, want unchanged %d", harness.broker.endSessionCount(), preReapEndSessions)
+	}
+	if harness.exchange.stopCount.Load() != preReapStops {
+		t.Errorf("Stop calls after reaper late-fire = %d, want unchanged %d", harness.exchange.stopCount.Load(), preReapStops)
+	}
+}
+
+// --- handleSessionExit on-demand branch ------------------------------
+
+// Full flow via the handler: on-demand session Live → 200 with
+// {status:"ended"}, EndSession called with Mode=OnDemand, Stop called,
+// registry reaped.
+func TestHandleSessionExit_OnDemandHappyPath_Returns200(t *testing.T) {
+	harness := newOnDemandTeardownHarness(t)
+	closeAt := harness.nowValue.Add(time.Minute)
+	sessionID, marketID := installActiveOnDemandInstance(t, harness, "u1", "IN", closeAt)
+
+	recorder := postExit(t, harness.conductor, http.MethodPost, sessionID)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200. body=%q", recorder.Code, recorder.Body.String())
+	}
+	var body sessionExitResponseBody
+	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if body.Status != "ended" {
+		t.Errorf("status payload = %q, want \"ended\"", body.Status)
+	}
+
+	if harness.broker.endSessionCount() != 1 {
+		t.Errorf("EndSession calls = %d, want 1", harness.broker.endSessionCount())
+	}
+	if harness.broker.lastEndSessionCmd().Mode != lifecycle.OnDemand {
+		t.Errorf("EndSession Mode = %v, want OnDemand", harness.broker.lastEndSessionCmd().Mode)
+	}
+	if harness.exchange.stopCount.Load() != 1 {
+		t.Errorf("Stop calls = %d, want 1", harness.exchange.stopCount.Load())
+	}
+	harness.conductor.reg.mu.Lock()
+	_, sessionPresent := harness.conductor.reg.sessions[sessionID]
+	_, marketPresent := harness.conductor.reg.markets[marketID]
+	harness.conductor.reg.mu.Unlock()
+	if sessionPresent || marketPresent {
+		t.Error("registry not reaped after on-demand exit")
+	}
+}
+
+// On-demand session already reaped (reaper fired first) → preflight
+// sees no session and the handler routes through the canonical path's
+// ErrSessionNotFound → 404. Documents the status-table deviation from
+// the orientation spec: "already-torn → 404 (preflight-honest)" rather
+// than a 200 idempotent reply.
+func TestHandleSessionExit_OnDemandAlreadyReaped_Returns404(t *testing.T) {
+	harness := newOnDemandTeardownHarness(t)
+	closeAt := harness.nowValue.Add(time.Minute)
+	sessionID, marketID := installActiveOnDemandInstance(t, harness, "u1", "IN", closeAt)
+	// Explicit prior teardown reaps the session + market.
+	harness.conductor.tearDownOnDemandInstance(context.Background(), marketID)
+	preExitEndSessions := harness.broker.endSessionCount()
+
+	recorder := postExit(t, harness.conductor, http.MethodPost, sessionID)
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404. body=%q", recorder.Code, recorder.Body.String())
+	}
+	if harness.broker.endSessionCount() != preExitEndSessions {
+		t.Errorf("EndSession calls increased on already-reaped exit = %d, want unchanged %d",
+			harness.broker.endSessionCount(), preExitEndSessions)
+	}
+}
+
+// EndSession returns an error from the handler path (shard timeout
+// scripted onto the fake). The handler still returns 200 because the
+// teardown body forward-progresses — the user's intent is honored.
+func TestHandleSessionExit_OnDemandEndSessionErr_StillReturns200AndReaps(t *testing.T) {
+	harness := newOnDemandTeardownHarness(t)
+	harness.broker.endSessionFunc = func(ctx context.Context, cmd funnel.SessionEndCmd) error {
+		return errors.New("scripted shard failure")
+	}
+	closeAt := harness.nowValue.Add(time.Minute)
+	sessionID, marketID := installActiveOnDemandInstance(t, harness, "u1", "IN", closeAt)
+
+	recorder := postExit(t, harness.conductor, http.MethodPost, sessionID)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (forward progress). body=%q", recorder.Code, recorder.Body.String())
+	}
+	// Reap still happened.
+	harness.conductor.reg.mu.Lock()
+	_, sessionPresent := harness.conductor.reg.sessions[sessionID]
+	_, marketPresent := harness.conductor.reg.markets[marketID]
+	harness.conductor.reg.mu.Unlock()
+	if sessionPresent || marketPresent {
+		t.Error("registry not reaped despite EndSession error — forward-progress contract violated at handler level")
 	}
 }

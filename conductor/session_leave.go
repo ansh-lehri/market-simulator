@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"time"
 
 	"simulator/broker/funnel"
 	"simulator/economy/lifecycle"
@@ -243,9 +244,13 @@ func (conductor *Conductor) handleSessionExit(responseWriter http.ResponseWriter
 		return
 	}
 
-	// Pre-flight on mode: if the session is on-demand, bail with 501
-	// before holding the lock any longer. leaveCanonicalSession also
-	// guards (defense-in-depth); doing it here keeps the error legible.
+	// Pre-flight resolves the session's Mode under one µs lock-take so
+	// the branch below picks the right teardown shape without the body
+	// having to defensively re-check. A session reaped between this
+	// read and the body (e.g. the on-demand reaper fired in the gap)
+	// is handled by the body's own idempotent guards and surfaces as
+	// 404 at the status mapper — no race window where we route the
+	// wrong teardown against the wrong account.
 	conductor.reg.mu.Lock()
 	preCheckSession := conductor.reg.sessions[sessionID]
 	var preCheckMode Mode
@@ -255,18 +260,28 @@ func (conductor *Conductor) handleSessionExit(responseWriter http.ResponseWriter
 		}
 	}
 	conductor.reg.mu.Unlock()
-	if preCheckSession != nil && preCheckMode != Canonical {
-		conductor.log.Info("conductor: handleSessionExit on-demand session routed to sibling (not implemented)",
-			"session_id", sessionID,
-			"mode", preCheckMode,
-		)
-		writeError(responseWriter, http.StatusNotImplemented, "on-demand teardown is in the sibling flow", PathSessionExit)
-		return
-	}
 
 	deadlineCtx, cancelDeadline := context.WithTimeout(request.Context(), conductor.joinTimeout)
 	defer cancelDeadline()
 
+	// On-demand branch: full teardown via tearDownOnDemandInstance.
+	// Status table is just 200/404 — the discard body log+proceeds on
+	// every error after the flip, so the only non-success exit from
+	// exitOnDemandSession is "session was already gone at preflight."
+	if preCheckSession != nil && preCheckMode == OnDemand {
+		exitErr := conductor.exitOnDemandSession(deadlineCtx, sessionID)
+		status := onDemandExitStatusFor(exitErr)
+		if exitErr != nil {
+			writeError(responseWriter, status, exitErr.Error(), PathSessionExit)
+			return
+		}
+		writeJSON(responseWriter, status, sessionExitResponseBody{Status: "ended"}, PathSessionExit)
+		return
+	}
+
+	// Canonical branch (also the fall-through for an unknown session —
+	// leaveCanonicalSession returns ErrSessionNotFound → 404 at
+	// exitStatusFor, same shape the on-demand branch would produce).
 	leaveErr := conductor.leaveCanonicalSession(deadlineCtx, sessionID)
 	status := exitStatusFor(leaveErr)
 	if leaveErr != nil {
@@ -275,4 +290,235 @@ func (conductor *Conductor) handleSessionExit(responseWriter http.ResponseWriter
 	}
 
 	writeJSON(responseWriter, status, sessionExitResponseBody{Status: "ended"}, PathSessionExit)
+}
+
+// --- on-demand teardown ----------------------------------------------
+
+// tearDownOnDemandInstance runs the full teardown for one on-demand
+// instance. This is the on-demand sibling of closeCanonicalMarket, but
+// collapsed to one ephemeral user+account rather than a market-wide
+// sweep:
+//
+//  1. FLIP + SNAPSHOT (lock, µs): look up the market; nil OR State !=
+//     Live → return. The second trigger in an exit-vs-reaper race
+//     observes State == TearingDown here and no-ops. From the flip
+//     onward, fanoutForSession returns nil for this market's session
+//     so a WebSocket attempt lands as 404.
+//
+//  2. OFF-LOCK (THE RULE — the registry mutex is never held across
+//     any of these call-outs):
+//     - broker.EndSession(Mode=OnDemand): routes a DiscardSession to
+//       the owning shard, which drops the ephemeral LoadedAccount
+//       and deletes the Redis snapshot. LOG + PROCEED on error —
+//       the ephemeral account is gone regardless; a stale snapshot
+//       is TTL-cleaned; the user's intent to end the session is
+//       honored by reaching Stop + reap unconditionally.
+//     - agents.WindDown: fire-and-forget signal to the agent
+//       orchestrator so the throwaway population unwinds.
+//     - exchange.Stop: shuts the exchange handle; tape close lets
+//       market-data self-clean its FanOut.
+//
+//  3. REAP (lock, µs): delete the single member session, delete the
+//     market, free the per-user byUser slot.
+//
+// Zero touch of market-data from this function — same Model-A split
+// closeCanonicalMarket follows (the socket close + shipped
+// Disconnect own the feed-side cleanup).
+func (conductor *Conductor) tearDownOnDemandInstance(ctx context.Context, marketID MarketID) {
+	// ---- FLIP + SNAPSHOT (lock take #1) ----
+	conductor.reg.mu.Lock()
+	market := conductor.reg.markets[marketID]
+	if market == nil || market.State != Live {
+		var observedState MarketState
+		if market != nil {
+			observedState = market.State
+		}
+		conductor.reg.mu.Unlock()
+		conductor.log.Info("conductor: tearDownOnDemandInstance skipped — market not Live",
+			"market_id", marketID,
+			"state", observedState,
+			"market_present", market != nil,
+		)
+		return
+	}
+	market.State = TearingDown
+
+	// On-demand carries exactly one member (the single user whose
+	// session this ephemeral market was spun up for). Snapshot it so
+	// the off-lock EndSession can target the account.
+	var singleMemberSessionID SessionID
+	for sessionID := range market.members {
+		singleMemberSessionID = sessionID
+		break
+	}
+	memberSession := conductor.reg.sessions[singleMemberSessionID]
+	if memberSession == nil {
+		// Market was Live but carried no corresponding session record
+		// — a wiring bug upstream, but the teardown's reap can still
+		// drop the orphan market. Log loudly and continue.
+		exchangeHandleForTeardown := market.exch
+		marketTagForTeardown := market.Tag
+		conductor.reg.mu.Unlock()
+		conductor.log.Error("conductor: tearDownOnDemandInstance market has no corresponding session record — reaping orphan market",
+			"market_id", marketID,
+			"snapshot_session_id", singleMemberSessionID,
+		)
+		if exchangeHandleForTeardown != nil {
+			exchangeHandleForTeardown.Stop()
+		}
+		conductor.agents.WindDown(marketTagForTeardown, OnDemand)
+		conductor.reg.mu.Lock()
+		delete(conductor.reg.markets, marketID)
+		conductor.reg.mu.Unlock()
+		return
+	}
+	accountID := memberSession.Account
+	userID := memberSession.User
+	exchangeHandleForTeardown := market.exch
+	marketTagForTeardown := market.Tag
+	conductor.reg.mu.Unlock()
+	conductor.log.Info("conductor: tearDownOnDemandInstance flipped to TearingDown",
+		"market_id", marketID,
+		"tag", marketTagForTeardown,
+		"session_id", singleMemberSessionID,
+		"user", userID,
+		"account_id", accountID,
+	)
+
+	// ---- OFF-LOCK: broker.EndSession (OnDemand = discard) ----
+	// Forward-progress on any error — the on-demand teardown contract
+	// is "always reach Stop + reap." Log the error for operability;
+	// the ephemeral account is dropped from the shard regardless, so
+	// nothing is left half-ended.
+	endErr := conductor.broker.EndSession(ctx, funnel.SessionEndCmd{
+		AccountID: funnel.AccountID(accountID),
+		SessionID: funnel.SessionID(singleMemberSessionID),
+		Mode:      lifecycle.OnDemand,
+	})
+	if endErr != nil {
+		conductor.log.Error("conductor: tearDownOnDemandInstance broker.EndSession incomplete; proceeding to wind-down + stop",
+			"market_id", marketID,
+			"session_id", singleMemberSessionID,
+			"account_id", accountID,
+			"err", endErr,
+		)
+	}
+
+	// ---- OFF-LOCK: agent wind-down (fire-and-forget) ----
+	conductor.agents.WindDown(marketTagForTeardown, OnDemand)
+
+	// ---- OFF-LOCK: exchange stop ----
+	if exchangeHandleForTeardown != nil {
+		exchangeHandleForTeardown.Stop()
+	}
+
+	// ---- REAP (lock take #2) ----
+	conductor.reg.mu.Lock()
+	if liveSession := conductor.reg.sessions[singleMemberSessionID]; liveSession != nil {
+		delete(conductor.reg.sessions, singleMemberSessionID)
+		if byUserHit := conductor.reg.byUser[liveSession.User]; byUserHit == liveSession {
+			delete(conductor.reg.byUser, liveSession.User)
+		}
+	}
+	delete(conductor.reg.markets, marketID)
+	conductor.reg.mu.Unlock()
+	conductor.log.Info("conductor: tearDownOnDemandInstance reap complete",
+		"market_id", marketID,
+		"session_id", singleMemberSessionID,
+		"user", userID,
+	)
+}
+
+// onDemandReaperDelay computes the sleep duration between now and the
+// market's scheduled end-of-session instant. Pure function so tests can
+// pin "the reaper is armed off closeAt, not now+duration" without
+// probing a running goroutine. A non-positive result means closeAt is
+// already in the past — the reaper fires immediately.
+func onDemandReaperDelay(now, closeAt time.Time) time.Duration {
+	return closeAt.Sub(now)
+}
+
+// spawnOnDemandReaper launches the single-session reaper goroutine. One
+// goroutine per on-demand instance, armed off the market's closeAt (the
+// session-end instant computed at spin-up finalize = construct-instant
+// + warm-up window + session duration). Fires tearDownOnDemandInstance
+// at closeAt, or exits cleanly on process shutdown.
+//
+// Registered on conductor.wg so Conductor.Stop's wg.Wait includes
+// reapers — a Stop in flight joins every outstanding reaper before
+// closing the OHLCV pool.
+//
+// Safe against a late fire: if the user's exit (or any other path)
+// already tore the market down, the reaper's tearDownOnDemandInstance
+// call enters, sees markets[marketID] == nil, and returns a no-op.
+func (conductor *Conductor) spawnOnDemandReaper(marketID MarketID, closeAt time.Time) {
+	conductor.wg.Add(1)
+	go func() {
+		defer conductor.wg.Done()
+		delay := onDemandReaperDelay(conductor.now(), closeAt)
+		conductor.log.Info("conductor: on-demand reaper armed",
+			"market_id", marketID,
+			"close_at", closeAt,
+			"delay", delay,
+		)
+		if !conductor.sleepOrQuit(delay) {
+			conductor.log.Info("conductor: on-demand reaper exiting on shutdown signal",
+				"market_id", marketID,
+				"close_at", closeAt,
+			)
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), conductor.closeTimeout)
+		defer cancel()
+		conductor.log.Info("conductor: on-demand reaper firing",
+			"market_id", marketID,
+			"close_at", closeAt,
+		)
+		conductor.tearDownOnDemandInstance(ctx, marketID)
+	}()
+}
+
+// exitOnDemandSession is the HTTP-driven wrapper around
+// tearDownOnDemandInstance: resolve sessionID → marketID under one
+// µs lock-take, then invoke the teardown body. The user-initiated
+// trigger from handleSessionExit's on-demand branch.
+//
+// A session that disappears between the preflight read and this
+// resolve returns ErrSessionNotFound — the reaper or another exit
+// already reaped it, and the HTTP response is 404 (the status table
+// deviation flagged in orientation: the body's own idempotency flip
+// no-ops cleanly, but the preflight-level resolve honestly reports
+// "no such session").
+func (conductor *Conductor) exitOnDemandSession(ctx context.Context, sessionID SessionID) error {
+	conductor.reg.mu.Lock()
+	session := conductor.reg.sessions[sessionID]
+	if session == nil {
+		conductor.reg.mu.Unlock()
+		conductor.log.Info("conductor: exitOnDemandSession rejected — unknown session",
+			"session_id", sessionID,
+		)
+		return ErrSessionNotFound
+	}
+	marketID := session.Market
+	conductor.reg.mu.Unlock()
+
+	conductor.tearDownOnDemandInstance(ctx, marketID)
+	return nil
+}
+
+// onDemandExitStatusFor maps an exitOnDemandSession return to an HTTP
+// status. The surface is deliberately flat — the on-demand teardown
+// body forward-progresses on every error after the flip, so the only
+// non-success return from exitOnDemandSession is ErrSessionNotFound
+// (preflight resolve miss → 404). Anything else — including a race
+// where the reaper fired between preflight and resolve — folds into
+// the same 404 or a clean 200 depending on timing.
+func onDemandExitStatusFor(err error) int {
+	if err == nil {
+		return http.StatusOK
+	}
+	if errors.Is(err, ErrSessionNotFound) {
+		return http.StatusNotFound
+	}
+	return http.StatusInternalServerError
 }
