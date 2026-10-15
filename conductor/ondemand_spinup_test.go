@@ -823,6 +823,10 @@ func (p probingAgents) BringUp(ctx context.Context, market MarketTag, mode Mode,
 	return p.inner.BringUp(ctx, market, mode, instruments)
 }
 
+func (p probingAgents) WindDown(market MarketTag, mode Mode) {
+	p.inner.WindDown(market, mode)
+}
+
 // --- Config load failure before any reserve --------------------------
 
 func TestStartOnDemand_UnknownTag_FailsBeforeReserve(t *testing.T) {

@@ -1,14 +1,54 @@
 package funnel
 
 import (
+	"context"
 	"log/slog"
 	"strconv"
 
 	"simulator/economy/account"
 	"simulator/economy/capstone"
+	"simulator/economy/lifecycle"
 	"simulator/economy/realize"
 	"simulator/economy/reserve"
 )
+
+// sessionSaver is the narrow slice of lifecycle.Service that
+// handleFinalizeMarketOnShard needs — one method, the same signature
+// shipped by lifecycle.Service.SessionSave. Introduced so in-package
+// tests can swap a fake without touching the shard's bundle wiring (the
+// bundle holds a concrete *lifecycle.Service everywhere else).
+//
+// Production: the real *lifecycle.Service satisfies this interface
+// trivially.
+// Tests:      a hand-written fake records calls and controls outcomes.
+type sessionSaver interface {
+	SessionSave(ctx context.Context, sessionID string, loaded lifecycle.LoadedAccount) error
+}
+
+// detachedAccount is the parked state of a canonical session that was
+// uninstalled via EndSession(Mode=Canonical) — the detach-keep teardown
+// path. The LoadedAccount survives on the shard so a later rejoin can
+// re-install over its carried positions and so FinalizeMarket at EOD can
+// persist it + unload it. Keyed by AccountID in shard.detached.
+//
+// Three fields:
+//
+//   - loaded         the whole lifecycle.LoadedAccount envelope exactly
+//                    as it sat on the live session when uninstall landed.
+//                    Positions, cash buckets, reservation map all intact.
+//   - lastSessionID  the SessionID the account was bound to at uninstall
+//                    time. FinalizeMarket calls lifecycle.SessionSave with
+//                    this value, and a re-install can detect "same session
+//                    returning" if it ever needs to.
+//   - exchangeID     the ExchangeID the account was bound to at uninstall
+//                    time. Redundant with loadedByExchange but keeps the
+//                    sweep self-contained — the handler reads it off the
+//                    detached record rather than walking the whole index.
+type detachedAccount struct {
+	loaded        lifecycle.LoadedAccount
+	lastSessionID SessionID
+	exchangeID    ExchangeID
+}
 
 // shard is one owner goroutine's home — the sole caller into the
 // reserve + realize engine for every account that hashes to it. Every field below is touched ONLY by
@@ -47,6 +87,32 @@ type shard struct {
 
 	sessions map[AccountID]*ownedSession
 	tracks   map[OrderID]*OrderTrack
+
+	// detached parks LoadedAccounts whose session was uninstalled via a
+	// canonical EndSession (detach-keep). The account survives on the
+	// shard until FinalizeMarket persists + unloads it at EOD. Written
+	// by handleUninstallSession and handleFinalizeMarketOnShard; read by
+	// handleFinalizeMarketOnShard. Owner-only, no mutex (single-writer).
+	detached map[AccountID]detachedAccount
+
+	// loadedByExchange indexes every LoadedAccount on this shard — both
+	// the live set in `sessions` and the parked set in `detached` — by
+	// the ExchangeID it was bound to at install time. FinalizeMarket's
+	// per-shard sweep walks loadedByExchange[exchangeID] to find the
+	// accounts belonging to one closing market. Written by
+	// handleInstallSession (add on install), handleUninstallSession
+	// (entry stays — account is still loaded on the shard, just parked),
+	// and handleFinalizeMarketOnShard (delete on unload). Owner-only.
+	loadedByExchange map[ExchangeID]map[AccountID]struct{}
+
+	// saver is the narrow lifecycle.Service surface FinalizeMarket's
+	// sweep uses to persist each account. Set at newShard time from
+	// bundle.Lifecycle when the bundle is present; nil otherwise
+	// (Phase-0 tests that never exercise finalize). handleFinalizeMarket
+	// OnShard surfaces nil as a per-account save error on the aggregate
+	// reply — so a shard with no saver reports accurately rather than
+	// panicking deep in the sweep.
+	saver sessionSaver
 
 	// seq — Phase-5 Point-1 OrderID mint source (BROKER_PHASE5 §1.4 P5-D4).
 	// Shard-local monotonic uint64; the shard goroutine is the sole writer,
@@ -101,12 +167,14 @@ func newShard(brokerID BrokerID, inboxDepth int, bundle *capstone.Bundle, mktCac
 		mktCache = nopMarketCache{}
 	}
 	builtShard := &shard{
-		inbox:    make(chan Command, inboxDepth),
-		brokerID: brokerID,
-		sessions: make(map[AccountID]*ownedSession),
-		tracks:   make(map[OrderID]*OrderTrack),
-		mktCache: mktCache,
-		bundle:   bundle,
+		inbox:            make(chan Command, inboxDepth),
+		brokerID:         brokerID,
+		sessions:         make(map[AccountID]*ownedSession),
+		tracks:           make(map[OrderID]*OrderTrack),
+		detached:         make(map[AccountID]detachedAccount),
+		loadedByExchange: make(map[ExchangeID]map[AccountID]struct{}),
+		mktCache:         mktCache,
+		bundle:           bundle,
 	}
 	if bundle != nil {
 		builtShard.realiz = realize.NewRealizer(builtShard, bundle.Persist, bundle.Cost)
@@ -117,6 +185,9 @@ func newShard(brokerID BrokerID, inboxDepth int, bundle *capstone.Bundle, mktCac
 			nopEvents{},
 			bundle.Persist,
 		)
+		if bundle.Lifecycle != nil {
+			builtShard.saver = bundle.Lifecycle
+		}
 	}
 	return builtShard
 }

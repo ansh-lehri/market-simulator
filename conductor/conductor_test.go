@@ -34,6 +34,17 @@ func (stubBrokerPort) WireInstance(exchangeID string, privateStream <-chan contr
 	// No-op: scaffold tests do not spawn settlement consumers.
 }
 
+func (stubBrokerPort) EndSession(ctx context.Context, cmd funnel.SessionEndCmd) error {
+	// No-op: scaffold tests that do not exercise the teardown flow;
+	// per-flow tests override by swapping the port with a dedicated fake.
+	return nil
+}
+
+func (stubBrokerPort) FinalizeMarket(ctx context.Context, exchangeID funnel.ExchangeID) error {
+	// No-op: see EndSession above.
+	return nil
+}
+
 type stubMarketDataPort struct{}
 
 func (stubMarketDataPort) WireInstance(exchangeID marketdata.ExchangeID, tape <-chan emit.TapeEvent, market string, mode marketdata.Mode) *marketdata.FanOut {

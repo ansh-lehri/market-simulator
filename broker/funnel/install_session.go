@@ -85,6 +85,18 @@ func (ownerShard *shard) handleInstallSession(cmd InstallSession) {
 		participant: cmd.Participant,
 		instruments: installedInstruments,
 	}
+	// Index this account under its binding's ExchangeID so a later
+	// FinalizeMarket sweep for that exchange finds it. The index spans
+	// live sessions AND detached accounts; this write handles the live
+	// case. (The uninstall path keeps the index entry — the account is
+	// still loaded on the shard, just parked in `detached`.)
+	exchangeIndexed := ownerShard.loadedByExchange[cmd.Binding.ExchangeID]
+	if exchangeIndexed == nil {
+		exchangeIndexed = make(map[AccountID]struct{})
+		ownerShard.loadedByExchange[cmd.Binding.ExchangeID] = exchangeIndexed
+	}
+	exchangeIndexed[cmd.AccountID] = struct{}{}
+
 	slog.Info("funnel: handleInstallSession installed",
 		"account_id", cmd.AccountID,
 		"session_id", cmd.Binding.SessionID,

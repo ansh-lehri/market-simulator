@@ -6,8 +6,19 @@ import (
 
 	"simulator/broker/marketdata"
 	"simulator/contract"
-	"simulator/exchange/wire"
 )
+
+// exchangeHandle is the narrow surface the registry needs from a built
+// exchange instance. Only Stop() is required — the shipped
+// *wire.Exchange satisfies this trivially, and tests can inject a
+// recording fake without pulling in the whole wire package.
+//
+// The field is unexported and set only by spin-up code (which assigns
+// a *wire.Exchange from exchange/wire); nothing in production reads it
+// as any type beyond this interface.
+type exchangeHandle interface {
+	Stop()
+}
 
 // Mode picks between the two session/market flavors. Distinct from
 // marketdata.Mode (same semantics, different package type) — the
@@ -119,8 +130,11 @@ type Market struct {
 	Tag   MarketTag
 	State MarketState
 
-	// exch is the wire.Exchange handle; set at finalize-Live.
-	exch *wire.Exchange
+	// exch is the exchange handle; set at finalize-Live. In production
+	// this is a *wire.Exchange from exchange/wire; the field is typed
+	// to the narrow exchangeHandle interface above so teardown tests
+	// can inject a recording fake without the real wire package.
+	exch exchangeHandle
 
 	// inbound is exch.Inbound retained for the join flow's StartSession
 	// binding (the per-session half of the exchange seam the conductor

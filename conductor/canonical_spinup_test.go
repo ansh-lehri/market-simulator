@@ -61,6 +61,10 @@ func (recorder *recordingAgents) BringUp(ctx context.Context, market MarketTag, 
 	return recorder.returnErr
 }
 
+func (recorder *recordingAgents) WindDown(market MarketTag, mode Mode) {
+	recorder.sequencer.record("agents.WindDown:" + string(market))
+}
+
 // recordingLiquidity is a fire-and-trust LiquidityOperator that only
 // records its call.
 type recordingLiquidity struct {

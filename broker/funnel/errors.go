@@ -43,3 +43,47 @@ var ErrBadParticipant = errors.New("funnel: SessionStartCmd has empty Participan
 // Install never overwrites; the first live session wins until teardown
 // clears the slot.
 var ErrSessionAlreadyLive = errors.New("funnel: session already live for account")
+
+// Session-teardown sentinels (canonical detach-keep path).
+
+// ErrBadAccountID — EndSession rejected the SessionEndCmd because its
+// AccountID was empty. Off-shard guard before any routing.
+var ErrBadAccountID = errors.New("funnel: SessionEndCmd has empty AccountID")
+
+// ErrBadSessionID — EndSession rejected the SessionEndCmd because its
+// SessionID was empty. Off-shard guard before any routing.
+var ErrBadSessionID = errors.New("funnel: SessionEndCmd has empty SessionID")
+
+// ErrModeNotImplemented — EndSession was called with a Mode this phase
+// does not implement (OnDemand). The on-demand teardown phase replaces
+// this with the discard path; until then an OnDemand call is a wiring
+// bug surface and never lands on a shard.
+var ErrModeNotImplemented = errors.New("funnel: EndSession Mode not implemented in this phase")
+
+// ErrNoLiveSession — handleUninstallSession found no ownedSession for
+// the AccountID. Treat as idempotent on the caller side (the session
+// was already uninstalled, or the account was never installed) rather
+// than as a hard failure.
+var ErrNoLiveSession = errors.New("funnel: no live session for account")
+
+// ErrSessionMismatch — handleUninstallSession found a live session for
+// the AccountID but its binding.SessionID did not match the command's
+// SessionID. A stale uninstall racing a fresh install, or a conductor
+// retry pointed at a replaced session. Refusal preserves the live
+// binding.
+var ErrSessionMismatch = errors.New("funnel: SessionID does not match live session")
+
+// ErrFinalizeIncomplete — FinalizeMarket's fan-out across shards
+// completed, but one or more per-shard sweeps surfaced errors. The
+// caller still saw a response from every shard (forward-progress at
+// the shard level too), but the aggregate is not fully clean. Wrap of
+// the first per-shard cause rides along via %w.
+var ErrFinalizeIncomplete = errors.New("funnel: FinalizeMarket completed with per-shard errors")
+
+// ErrNonCanonicalDuringFinalize — FinalizeMarket encountered a
+// LoadedAccount with PersistOnClose=false. This phase does not sweep
+// on-demand accounts (the on-demand teardown owns their discard path);
+// the invariant is that only canonical accounts land in a canonical
+// market's loadedByExchange index. Dev-fatal — surfaces as a shard
+// panic per the project constitution.
+var ErrNonCanonicalDuringFinalize = errors.New("funnel: FinalizeMarket encountered a non-canonical account (invariant violation)")

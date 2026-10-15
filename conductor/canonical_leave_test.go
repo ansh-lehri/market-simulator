@@ -36,7 +36,9 @@ type fakeLeaveBroker struct {
 	endSessionInvocations []funnel.SessionEndCmd
 	endSessionFunc        func(ctx context.Context, cmd funnel.SessionEndCmd) error
 
-	finalizeMarketCount int
+	finalizeMarketInvocations []funnel.ExchangeID
+	finalizeMarketFunc        func(ctx context.Context, exchangeID funnel.ExchangeID) error
+	finalizeMarketCount       int
 }
 
 func (fake *fakeLeaveBroker) EndSession(ctx context.Context, cmd funnel.SessionEndCmd) error {
@@ -53,8 +55,13 @@ func (fake *fakeLeaveBroker) EndSession(ctx context.Context, cmd funnel.SessionE
 func (fake *fakeLeaveBroker) FinalizeMarket(ctx context.Context, exchangeID funnel.ExchangeID) error {
 	fake.callLock.Lock()
 	fake.finalizeMarketCount++
+	fake.finalizeMarketInvocations = append(fake.finalizeMarketInvocations, exchangeID)
+	hook := fake.finalizeMarketFunc
 	fake.callLock.Unlock()
-	return nil
+	if hook == nil {
+		return nil
+	}
+	return hook(ctx, exchangeID)
 }
 
 func (fake *fakeLeaveBroker) endSessionCount() int {

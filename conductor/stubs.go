@@ -74,11 +74,20 @@ func stubDrawToOutcome(draw int) string {
 // outcomeCounts is observable to in-package tests via
 // outcomeCountsSnapshot. It is not part of the exported surface — the
 // stub is unexported, and so is this accessor.
+// stubWindDownCall captures one invocation of the stub orchestrator's
+// WindDown method so in-package tests can confirm the close flow
+// signaled the orchestrator the way the handler contract requires.
+type stubWindDownCall struct {
+	Market MarketTag
+	Mode   Mode
+}
+
 type stubAgentOrchestrator struct {
 	log           *slog.Logger
 	random        *rand.Rand
 	randomLock    sync.Mutex
 	outcomeCounts map[string]int
+	windDownCalls []stubWindDownCall
 }
 
 func newStubAgentOrchestrator(log *slog.Logger, seed int64) *stubAgentOrchestrator {
@@ -143,6 +152,35 @@ func (stub *stubAgentOrchestrator) BringUp(ctx context.Context, market MarketTag
 		)
 		return ErrAgentBringUpRejected
 	}
+}
+
+// WindDown signals a market close to the stub orchestrator. The real
+// orchestrator will flatten and persist its agents' state for the
+// market; the stub just records that it was called and logs. Signature
+// WILL change with the real orchestrator design.
+//
+// Concurrency: windDownCalls is guarded by randomLock (reused — the
+// stub already uses it to protect outcomeCounts; both are rare-path
+// fields, keeping one mutex rather than two is clearer).
+func (stub *stubAgentOrchestrator) WindDown(market MarketTag, mode Mode) {
+	stub.randomLock.Lock()
+	stub.windDownCalls = append(stub.windDownCalls, stubWindDownCall{Market: market, Mode: mode})
+	stub.randomLock.Unlock()
+	stub.log.Debug("conductor: stub AgentOrchestrator.WindDown",
+		"market", market,
+		"mode", mode,
+	)
+}
+
+// windDownCallsSnapshot returns a copy of the recorded WindDown calls.
+// In-package tests use it to assert the close-shape flow invoked the
+// orchestrator the right number of times with the right arguments.
+func (stub *stubAgentOrchestrator) windDownCallsSnapshot() []stubWindDownCall {
+	stub.randomLock.Lock()
+	defer stub.randomLock.Unlock()
+	copied := make([]stubWindDownCall, len(stub.windDownCalls))
+	copy(copied, stub.windDownCalls)
+	return copied
 }
 
 // outcomeCountsSnapshot returns a copy of the current outcome tally.

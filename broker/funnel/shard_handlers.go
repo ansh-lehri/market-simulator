@@ -41,6 +41,17 @@ func (ownerShard *shard) dispatch(cmd Command) {
 		// pure in-memory (XOR + map write + reply); body lives in
 		// install_session.go.
 		ownerShard.handleInstallSession(typedCmd)
+	case UninstallSession:
+		// Canonical session teardown's detach-keep step. Pure in-memory
+		// (SessionID match + map move + reply); body lives in
+		// uninstall_session.go. Account state is NOT touched — persist +
+		// unload happen later via FinalizeMarket at the market's close.
+		ownerShard.handleUninstallSession(typedCmd)
+	case FinalizeMarketOnShard:
+		// Market-close sweep across every account bound to one
+		// ExchangeID. Persists via lifecycle.SessionSave and unloads.
+		// Body lives in finalize_market.go.
+		ownerShard.handleFinalizeMarketOnShard(typedCmd)
 	default:
 		panic(fmt.Sprintf("funnel: shard dispatch: unknown command type %T", cmd))
 	}

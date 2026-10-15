@@ -128,11 +128,18 @@ func (conductor *Conductor) runCanonicalTimer(marketTag MarketTag) {
 		marketID, spinUpErr := conductor.spinUpCanonical(context.Background(), marketTag)
 		switch {
 		case spinUpErr == nil:
-			conductor.log.Info("conductor: canonical timer spin-up succeeded; re-arming for next weekday",
+			conductor.log.Info("conductor: canonical timer spin-up succeeded; arming close",
 				"tag", marketTag,
 				"market_id", marketID,
 			)
+			if !conductor.armNextCanonicalClose(marketTag, marketID) {
+				conductor.log.Info("conductor: canonical timer exiting (during close-wait)", "tag", marketTag)
+				return
+			}
 		case errors.Is(spinUpErr, ErrAlreadyUp):
+			// A duplicate trigger found an existing record — don't arm a
+			// second close for the same market from this timer. The
+			// original trigger's loop is the one that arms close.
 			conductor.log.Info("conductor: canonical timer spin-up found existing record; re-arming",
 				"tag", marketTag,
 				"market_id", marketID,
@@ -144,6 +151,58 @@ func (conductor *Conductor) runCanonicalTimer(marketTag MarketTag) {
 			)
 		}
 	}
+}
+
+// armNextCanonicalClose reads the market's closeAt under the registry
+// mutex (microsecond), sleeps until that instant OR exits if timerQuit
+// closes mid-wait, then fires closeCanonicalMarket. Returns true on
+// close completion (loop re-arms for the next weekday) OR when the
+// market's closeAt was already in the past AND timerQuit is not yet
+// closed. Returns false ONLY when timerQuit closed during the sleep —
+// signals the caller to exit.
+//
+// Why read closeAt here rather than taking it as an argument: spin-up
+// commits closeAt onto the market record UNDER THE SAME LOCK that
+// flipped the record to Live. Reading it here keeps the "closeAt is a
+// property of the Live market record" invariant and avoids plumbing
+// yet another value through runCanonicalTimer's call sites.
+//
+// Nil market record (deleted between the spin-up commit and this read)
+// is defensive: a close for a vanished market is a no-op; log and
+// return true so the timer loops to the next weekday.
+func (conductor *Conductor) armNextCanonicalClose(marketTag MarketTag, marketID MarketID) bool {
+	conductor.reg.mu.Lock()
+	market := conductor.reg.markets[marketID]
+	if market == nil {
+		conductor.reg.mu.Unlock()
+		conductor.log.Warn("conductor: canonical timer close-arm skipped — market vanished before close-arm",
+			"tag", marketTag,
+			"market_id", marketID,
+		)
+		return true
+	}
+	closeAt := market.closeAt
+	conductor.reg.mu.Unlock()
+
+	delay := closeAt.Sub(conductor.now())
+	conductor.log.Info("conductor: canonical timer close-armed",
+		"tag", marketTag,
+		"market_id", marketID,
+		"close_at", closeAt,
+		"delay", delay,
+	)
+	if !conductor.sleepOrQuit(delay) {
+		return false
+	}
+
+	// On-close context: bounded by the configured CloseTimeout — the
+	// broker barrier (FinalizeMarket) has its own time budget, separate
+	// from the inter-arm sleep. A context.Background() parent is correct
+	// here (no incoming request to inherit from).
+	ctx, cancel := context.WithTimeout(context.Background(), conductor.closeTimeout)
+	defer cancel()
+	conductor.closeCanonicalMarket(ctx, marketID)
+	return true
 }
 
 // sleepOrQuit blocks for delay OR returns false if timerQuit closes

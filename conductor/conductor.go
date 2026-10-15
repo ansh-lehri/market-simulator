@@ -59,6 +59,15 @@ const DefaultAccountOpenTimeout = 3 * time.Second
 // Config.SetupTimeout overrides.
 const DefaultSetupTimeout = 90 * time.Second
 
+// DefaultCloseTimeout bounds the per-sweep context the per-market
+// timer installs around closeCanonicalMarket's broker.FinalizeMarket
+// call. The barrier is a fan-out across every shard, each saving every
+// account bound to the closing exchangeID; sixty seconds is loose
+// enough that a healthy Postgres handles thousands of accounts, tight
+// enough that a wedged save surfaces as log + forward-progress rather
+// than hanging the close indefinitely. Config.CloseTimeout overrides.
+const DefaultCloseTimeout = 60 * time.Second
+
 // Config is the construction input for NewConductor. Required fields
 // (CfgDir, OHLCVPool, Broker, Market) have no sensible default and
 // error at construction; optional fields default to the logging stubs
@@ -129,6 +138,12 @@ type Config struct {
 	// so a persistent config error never spins the loop. Tests set a
 	// small value.
 	BadConfigRetryDelay time.Duration
+
+	// CloseTimeout bounds the context the per-market timer installs
+	// around closeCanonicalMarket's broker.FinalizeMarket call. Zero →
+	// DefaultCloseTimeout. Expiry surfaces as log + forward-progress
+	// (the close proceeds to WindDown + Stop + reap regardless).
+	CloseTimeout time.Duration
 }
 
 // Conductor is this package's top-level object — holds the registry,
@@ -153,6 +168,7 @@ type Conductor struct {
 	accountOpenTimeout  time.Duration
 	setupTimeout        time.Duration
 	badConfigRetryDelay time.Duration
+	closeTimeout        time.Duration
 	wsHandlerFactory    wsHandlerFactoryFn
 	stopOnce            sync.Once
 
@@ -225,6 +241,10 @@ func NewConductor(cfg Config) (*Conductor, error) {
 	if badConfigRetryDelay == 0 {
 		badConfigRetryDelay = DefaultBadConfigRetryDelay
 	}
+	closeTimeout := cfg.CloseTimeout
+	if closeTimeout == 0 {
+		closeTimeout = DefaultCloseTimeout
+	}
 
 	conductor := &Conductor{
 		reg:                 newRegistry(),
@@ -244,6 +264,7 @@ func NewConductor(cfg Config) (*Conductor, error) {
 		accountOpenTimeout:  accountOpenTimeout,
 		setupTimeout:        setupTimeout,
 		badConfigRetryDelay: badConfigRetryDelay,
+		closeTimeout:        closeTimeout,
 		wsHandlerFactory:    wsHandlerFactory,
 	}
 	log.Info("conductor: constructed",
@@ -254,6 +275,7 @@ func NewConductor(cfg Config) (*Conductor, error) {
 		"account_open_timeout", conductor.accountOpenTimeout,
 		"setup_timeout", conductor.setupTimeout,
 		"bad_config_retry_delay", conductor.badConfigRetryDelay,
+		"close_timeout", conductor.closeTimeout,
 	)
 	return conductor, nil
 }
