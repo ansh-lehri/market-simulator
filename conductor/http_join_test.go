@@ -126,27 +126,73 @@ func TestHandleJoinCanonical_NoLiveMarketReturns409(t *testing.T) {
 	assertErrorBody(t, recorder)
 }
 
-func TestHandleJoinCanonical_AlreadyInSessionReturns409(t *testing.T) {
+// A second POST for the same {user, market} with an Active session is a
+// reconnect — same identifiers returned, zero new broker calls.
+func TestHandleJoinCanonical_SameUserSameMarket_ReturnsReconnect(t *testing.T) {
 	conductor, broker := newHandlerHarness(t)
 	installLiveCanonicalMarket(t, conductor, "IN")
 
-	// First join succeeds, second one hits the per-user XOR front-gate.
 	firstRecorder := postJoin(t, conductor, http.MethodPost,
 		`{"user":{"email":"u@x","user_id":"human-42"},"market":"IN"}`)
 	if firstRecorder.Code != http.StatusOK {
 		t.Fatalf("first join status = %d, want 200", firstRecorder.Code)
 	}
+	var firstBody joinResponseBody
+	if err := json.Unmarshal(firstRecorder.Body.Bytes(), &firstBody); err != nil {
+		t.Fatalf("decode first body: %v", err)
+	}
 
 	secondRecorder := postJoin(t, conductor, http.MethodPost,
 		`{"user":{"email":"u@x","user_id":"human-42"},"market":"IN"}`)
+	if secondRecorder.Code != http.StatusOK {
+		t.Fatalf("second join status = %d, want 200 (reconnect). body=%q",
+			secondRecorder.Code, secondRecorder.Body.String())
+	}
+	var secondBody joinResponseBody
+	if err := json.Unmarshal(secondRecorder.Body.Bytes(), &secondBody); err != nil {
+		t.Fatalf("decode second body: %v", err)
+	}
+	if secondBody.SessionID != firstBody.SessionID {
+		t.Errorf("reconnect session_id = %q, want %q", secondBody.SessionID, firstBody.SessionID)
+	}
+	if secondBody.ParticipantID != firstBody.ParticipantID {
+		t.Errorf("reconnect participant_id = %q, want %q", secondBody.ParticipantID, firstBody.ParticipantID)
+	}
+	if secondBody.Status != "active" {
+		t.Errorf("reconnect status = %q, want \"active\"", secondBody.Status)
+	}
+	if broker.ensureAccountCount() != 1 || broker.startSessionCount() != 1 {
+		t.Errorf("broker call counts: ensure=%d start=%d, want 1 each (reconnect must not call the broker)",
+			broker.ensureAccountCount(), broker.startSessionCount())
+	}
+}
+
+// A POST for a market the user is NOT already on, while they hold a
+// session on another market, must return 409 with ErrLiveElsewhere.
+func TestHandleJoinCanonical_LiveElsewhereReturns409(t *testing.T) {
+	conductor, broker := newHandlerHarness(t)
+	installLiveCanonicalMarket(t, conductor, "IN")
+	installLiveCanonicalMarket(t, conductor, "US")
+
+	firstRecorder := postJoin(t, conductor, http.MethodPost,
+		`{"user":{"email":"u@x","user_id":"human-42"},"market":"IN"}`)
+	if firstRecorder.Code != http.StatusOK {
+		t.Fatalf("first join status = %d, want 200", firstRecorder.Code)
+	}
+	ensureCallsAfterFirstJoin := broker.ensureAccountCount()
+	startCallsAfterFirstJoin := broker.startSessionCount()
+
+	secondRecorder := postJoin(t, conductor, http.MethodPost,
+		`{"user":{"email":"u@x","user_id":"human-42"},"market":"US"}`)
 	if secondRecorder.Code != http.StatusConflict {
 		t.Fatalf("second join status = %d, want 409. body=%q",
 			secondRecorder.Code, secondRecorder.Body.String())
 	}
-	// The front-gate must have refused the second attempt before any new
-	// broker I/O.
-	if broker.ensureAccountCount() != 1 || broker.startSessionCount() != 1 {
-		t.Errorf("broker call counts: ensure=%d start=%d, want 1 each", broker.ensureAccountCount(), broker.startSessionCount())
+	if broker.ensureAccountCount() != ensureCallsAfterFirstJoin ||
+		broker.startSessionCount() != startCallsAfterFirstJoin {
+		t.Errorf("live-elsewhere must not touch the broker: ensure delta=%d start delta=%d",
+			broker.ensureAccountCount()-ensureCallsAfterFirstJoin,
+			broker.startSessionCount()-startCallsAfterFirstJoin)
 	}
 	assertErrorBody(t, secondRecorder)
 }
