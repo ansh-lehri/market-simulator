@@ -26,7 +26,7 @@ func TestJoinStatusFor(t *testing.T) {
 
 		// Conflicts.
 		{"ErrMarketNotLive to 409", ErrMarketNotLive, http.StatusConflict},
-		{"ErrAlreadyInSession to 409", ErrAlreadyInSession, http.StatusConflict},
+		{"ErrLiveElsewhere to 409", ErrLiveElsewhere, http.StatusConflict},
 		{"funnel.ErrSessionAlreadyLive to 409", funnel.ErrSessionAlreadyLive, http.StatusConflict},
 
 		// Shard-reply timeout.
