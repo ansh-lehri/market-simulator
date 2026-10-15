@@ -22,7 +22,7 @@ package conductor
 //     across leave + rejoin."
 //
 // All four scenarios execute real conductor code (handleJoinCanonical,
-// handleCanonicalExit, closeCanonicalMarket) and assert on observable
+// handleSessionExit, closeCanonicalMarket) and assert on observable
 // state: HTTP status codes, response bodies, conductor registry maps,
 // and the stateful broker's visible side effects.
 
@@ -301,7 +301,7 @@ func (harness *lifecycleHarness) postExit(t *testing.T, sessionID SessionID) *ht
 	t.Helper()
 	request := httptest.NewRequest(http.MethodPost, PathSessionExit+"?session="+string(sessionID), strings.NewReader(""))
 	recorder := httptest.NewRecorder()
-	harness.conductor.handleCanonicalExit(recorder, request)
+	harness.conductor.handleSessionExit(recorder, request)
 	return recorder
 }
 

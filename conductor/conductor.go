@@ -363,7 +363,7 @@ func (conductor *Conductor) MountRoutes(mux *http.ServeMux) {
 	mux.HandleFunc(PathSessionOnDemand, conductor.handleStartOnDemand)
 	mux.HandleFunc(PathSessionStatus, conductor.handleSessionStatus)
 	mux.HandleFunc(PathSessionCurrent, conductor.handleSessionCurrent)
-	mux.HandleFunc(PathSessionExit, conductor.handleCanonicalExit)
+	mux.HandleFunc(PathSessionExit, conductor.handleSessionExit)
 	mux.HandleFunc(marketdata.PathWS, conductor.handleWS)
 	mux.HandleFunc(PathMarkets, conductor.handleMarkets)
 	mux.HandleFunc(PathInstruments, conductor.handleInstruments)

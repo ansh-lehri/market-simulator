@@ -10,15 +10,17 @@ import (
 	"simulator/economy/lifecycle"
 )
 
-// PathSessionExit is the canonical-leave endpoint. Carrier shape:
+// PathSessionExit is the session-exit endpoint. Carrier shape:
 // POST /session/exit?session=<sid>. Chosen over /session/{id}/exit so
 // every session-level HTTP surface in this package shares one carrier
-// (the WebSocket, /session/status, and the leave endpoint all read
+// (the WebSocket, /session/status, and this endpoint all read
 // ?session=<sid>).
 //
-// The handler is MODE-BRANCHED: canonical sessions take the detach-keep
-// path implemented here; on-demand sessions are served by a sibling
-// phase. Until that lands, OnDemand sessions return 501.
+// The handler (handleSessionExit) is MODE-BRANCHED: a canonical session
+// takes the detach-keep path (leaveCanonicalSession, this file); an
+// on-demand session takes the full-teardown path (added in the sibling
+// on-demand teardown stage in this same file). Until that lands, an
+// on-demand session returns 501.
 const PathSessionExit = "/session/exit"
 
 // --- JSON wire shapes ------------------------------------------------
@@ -209,16 +211,22 @@ func (conductor *Conductor) leaveCanonicalSession(ctx context.Context, sessionID
 
 // --- HTTP handler ----------------------------------------------------
 
-// handleCanonicalExit is the POST /session/exit?session=<sid> ingress.
-// Carrier mirrors /session/status: the SessionID rides as a query
-// parameter so the frontend uses the same shape for both endpoints.
+// handleSessionExit is the POST /session/exit?session=<sid> ingress for
+// both canonical and on-demand sessions. Carrier mirrors
+// /session/status: the SessionID rides as a query parameter so the
+// frontend uses the same shape for both endpoints.
 //
-// The handler is mode-branched: a canonical session takes the
-// detach-keep path; an on-demand session returns 501 until the sibling
-// phase ships. The branch is picked from the registry's Market record
-// so a stray canonical-leave call against an on-demand session cannot
-// damage the on-demand account.
-func (conductor *Conductor) handleCanonicalExit(responseWriter http.ResponseWriter, request *http.Request) {
+// The handler is MODE-BRANCHED off the registry's Market record so a
+// stray canonical-leave call against an on-demand session (or vice
+// versa) cannot damage either account:
+//
+//   - Canonical session → leaveCanonicalSession (detach-keep: broker
+//     uninstalls the binding, keeps the LoadedAccount parked for
+//     market-close FinalizeMarket). This file.
+//   - OnDemand session  → full teardown (ephemeral account dropped,
+//     Redis snapshot deleted). Added in the on-demand teardown stage;
+//     until that lands this arm returns 501.
+func (conductor *Conductor) handleSessionExit(responseWriter http.ResponseWriter, request *http.Request) {
 	defer recoverPanic(responseWriter, PathSessionExit)
 
 	if request.Method != http.MethodPost {
@@ -228,7 +236,7 @@ func (conductor *Conductor) handleCanonicalExit(responseWriter http.ResponseWrit
 
 	sessionID := SessionID(request.URL.Query().Get("session"))
 	if sessionID == "" {
-		conductor.log.Info("conductor: handleCanonicalExit missing session carrier",
+		conductor.log.Info("conductor: handleSessionExit missing session carrier",
 			"remote_addr", request.RemoteAddr,
 		)
 		writeError(responseWriter, http.StatusBadRequest, "session required", PathSessionExit)
@@ -248,7 +256,7 @@ func (conductor *Conductor) handleCanonicalExit(responseWriter http.ResponseWrit
 	}
 	conductor.reg.mu.Unlock()
 	if preCheckSession != nil && preCheckMode != Canonical {
-		conductor.log.Info("conductor: handleCanonicalExit on-demand session routed to sibling (not implemented)",
+		conductor.log.Info("conductor: handleSessionExit on-demand session routed to sibling (not implemented)",
 			"session_id", sessionID,
 			"mode", preCheckMode,
 		)

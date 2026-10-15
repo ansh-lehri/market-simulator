@@ -142,7 +142,7 @@ func installActiveSession(t *testing.T, harness *leaveHarness, userID UserID, ta
 	return sessionID
 }
 
-// postExit drives handleCanonicalExit directly with ?session=<sid>.
+// postExit drives handleSessionExit directly with ?session=<sid>.
 func postExit(t *testing.T, conductor *Conductor, method string, sessionID SessionID) *httptest.ResponseRecorder {
 	t.Helper()
 	url := PathSessionExit
@@ -151,7 +151,7 @@ func postExit(t *testing.T, conductor *Conductor, method string, sessionID Sessi
 	}
 	request := httptest.NewRequest(method, url, strings.NewReader(""))
 	recorder := httptest.NewRecorder()
-	conductor.handleCanonicalExit(recorder, request)
+	conductor.handleSessionExit(recorder, request)
 	return recorder
 }
 

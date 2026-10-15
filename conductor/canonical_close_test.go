@@ -2,7 +2,7 @@ package conductor
 
 // closeCanonicalMarket + armNextCanonicalClose tests. Fakes:
 //
-//   - fakeLeaveBroker (from canonical_leave_test.go) — now also exposes
+//   - fakeLeaveBroker (from session_leave_test.go) — now also exposes
 //     a programmable FinalizeMarket outcome and an invocation list.
 //   - recordingWindDownAgents — AgentOrchestrator with a WindDown
 //     recorder (BringUp stays unused by the close path).
