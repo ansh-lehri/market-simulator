@@ -25,6 +25,15 @@ type sessionSaver interface {
 	SessionSave(ctx context.Context, sessionID string, loaded lifecycle.LoadedAccount) error
 }
 
+// sessionDiscarder is the parallel narrow slice of lifecycle.Service
+// that handleDiscardSession needs — one method, matching
+// lifecycle.Service.SessionDiscard. Same pattern as sessionSaver: the
+// bundle's concrete *lifecycle.Service satisfies both interfaces, and
+// tests inject a hand-written fake.
+type sessionDiscarder interface {
+	SessionDiscard(ctx context.Context, sessionID string, loaded lifecycle.LoadedAccount) error
+}
+
 // detachedAccount is the parked state of a canonical session that was
 // uninstalled via EndSession(Mode=Canonical) — the detach-keep teardown
 // path. The LoadedAccount survives on the shard so a later rejoin can
@@ -114,6 +123,14 @@ type shard struct {
 	// panicking deep in the sweep.
 	saver sessionSaver
 
+	// discarder is the narrow lifecycle.Service surface the on-demand
+	// discard handler uses to drop the ephemeral account's Redis
+	// snapshot. Set alongside saver at newShard time from
+	// bundle.Lifecycle; nil otherwise (bundle-less test wirings).
+	// handleDiscardSession surfaces nil as an ErrDiscardFailed on the
+	// reply — same reporting contract as a save-side missing saver.
+	discarder sessionDiscarder
+
 	// seq — Phase-5 Point-1 OrderID mint source (BROKER_PHASE5 §1.4 P5-D4).
 	// Shard-local monotonic uint64; the shard goroutine is the sole writer,
 	// so a plain `s.seq++` is correct — no atomic, no lock. Mint shape is
@@ -187,6 +204,7 @@ func newShard(brokerID BrokerID, inboxDepth int, bundle *capstone.Bundle, mktCac
 		)
 		if bundle.Lifecycle != nil {
 			builtShard.saver = bundle.Lifecycle
+			builtShard.discarder = bundle.Lifecycle
 		}
 	}
 	return builtShard

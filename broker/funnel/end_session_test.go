@@ -58,21 +58,6 @@ func TestEndSession_EmptySessionIDRejectedOffShard(t *testing.T) {
 	}
 }
 
-// OnDemand mode is intentionally unimplemented this phase; the on-demand
-// teardown phase replaces this stub with the discard path.
-func TestEndSession_OnDemandReturnsModeNotImplemented(t *testing.T) {
-	brokerUnderTest := NewBroker("B-endsession-ondemand", 4, []*capstone.Bundle{nil}, nil, MoneyConfig{}, nil)
-
-	err := brokerUnderTest.EndSession(context.Background(), SessionEndCmd{
-		AccountID: "acc-x",
-		SessionID: "sess-x",
-		Mode:      lifecycle.OnDemand,
-	})
-	if !errors.Is(err, ErrModeNotImplemented) {
-		t.Fatalf("err = %v, want errors.Is ErrModeNotImplemented", err)
-	}
-}
-
 // A Mode value outside Canonical | OnDemand is a programming error at
 // the caller. Returns a wrapped-string error (not a category sentinel)
 // so the caller's error log carries the raw int value.
@@ -89,7 +74,7 @@ func TestEndSession_UnknownModeReturnsError(t *testing.T) {
 	}
 	// Must NOT be any of the typed sentinels — those cover the known
 	// branches; unknown-Mode is a bare fmt.Errorf.
-	for _, sentinel := range []error{ErrBadAccountID, ErrBadSessionID, ErrModeNotImplemented} {
+	for _, sentinel := range []error{ErrBadAccountID, ErrBadSessionID} {
 		if errors.Is(err, sentinel) {
 			t.Errorf("err = %v, matched %v — unknown-mode must be its own category", err, sentinel)
 		}
@@ -142,6 +127,111 @@ func TestEndSession_CanonicalHappyAndRepeatReturnsNoLiveSession(t *testing.T) {
 	})
 	if !errors.Is(err, ErrNoLiveSession) {
 		t.Fatalf("second EndSession: got %v, want errors.Is ErrNoLiveSession (idempotent)", err)
+	}
+}
+
+// On-demand happy path through a running broker: install an on-demand
+// session (PersistOnClose=false), EndSession returns nil, a repeat with
+// the same SessionID now reports ErrNoLiveSession (the ephemeral account
+// has been dropped — not parked, unlike canonical).
+//
+// Injects a fake discarder on every shard so the Redis snapshot delete
+// is observable without a real lifecycle service.
+func TestEndSession_OnDemandHappyAndRepeatReturnsNoLiveSession(t *testing.T) {
+	brokerUnderTest := NewBroker("B-endsession-ondemand", 4, []*capstone.Bundle{nil}, nil, MoneyConfig{}, nil)
+	discarderFake := &fakeSessionDiscarder{alwaysSucceed: true}
+	for _, shardOwner := range brokerUnderTest.shards {
+		shardOwner.discarder = discarderFake
+	}
+	brokerUnderTest.Start()
+	t.Cleanup(brokerUnderTest.Stop)
+
+	accountID := account.AccountID("acc-happy-ondemand")
+	loaded := loadedAccountFixture(accountID, false /*on-demand*/)
+	binding := bindingFixture("sess-happy-ondemand", "X-happy-ondemand")
+
+	installReply := make(chan error, 1)
+	brokerUnderTest.route(InstallSession{
+		AccountID:   accountID,
+		Loaded:      loaded,
+		Binding:     binding,
+		Participant: "P-happy-ondemand",
+		Reply:       installReply,
+	})
+	if err := <-installReply; err != nil {
+		t.Fatalf("precondition install: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := brokerUnderTest.EndSession(ctx, SessionEndCmd{
+		AccountID: accountID,
+		SessionID: "sess-happy-ondemand",
+		Mode:      lifecycle.OnDemand,
+	}); err != nil {
+		t.Fatalf("first EndSession: %v, want nil", err)
+	}
+	if discarderFake.callCount() != 1 {
+		t.Errorf("SessionDiscard call count = %d, want 1", discarderFake.callCount())
+	}
+
+	// Repeat with same SessionID — the ephemeral account is gone from
+	// `sessions` entirely (not parked), so the handler reports
+	// ErrNoLiveSession the same way a canonical double-end does.
+	err := brokerUnderTest.EndSession(ctx, SessionEndCmd{
+		AccountID: accountID,
+		SessionID: "sess-happy-ondemand",
+		Mode:      lifecycle.OnDemand,
+	})
+	if !errors.Is(err, ErrNoLiveSession) {
+		t.Fatalf("second EndSession: got %v, want errors.Is ErrNoLiveSession (idempotent)", err)
+	}
+	if discarderFake.callCount() != 1 {
+		t.Errorf("SessionDiscard call count after repeat = %d, want 1 (no-live-session short-circuits before discard)", discarderFake.callCount())
+	}
+}
+
+// On-demand EndSession with a stale SessionID on an account whose live
+// binding carries a different SessionID returns ErrSessionMismatch — the
+// same mismatch guard as the canonical path, exercised via the on-demand
+// command route.
+func TestEndSession_OnDemandSessionMismatchViaRunningBroker(t *testing.T) {
+	brokerUnderTest := NewBroker("B-endsession-ondemand-mismatch", 4, []*capstone.Bundle{nil}, nil, MoneyConfig{}, nil)
+	discarderFake := &fakeSessionDiscarder{alwaysSucceed: true}
+	for _, shardOwner := range brokerUnderTest.shards {
+		shardOwner.discarder = discarderFake
+	}
+	brokerUnderTest.Start()
+	t.Cleanup(brokerUnderTest.Stop)
+
+	accountID := account.AccountID("acc-mismatch-ondemand")
+	loaded := loadedAccountFixture(accountID, false /*on-demand*/)
+	binding := bindingFixture("sess-live-ondemand", "X-mismatch-ondemand")
+
+	installReply := make(chan error, 1)
+	brokerUnderTest.route(InstallSession{
+		AccountID:   accountID,
+		Loaded:      loaded,
+		Binding:     binding,
+		Participant: "P-mismatch-ondemand",
+		Reply:       installReply,
+	})
+	if err := <-installReply; err != nil {
+		t.Fatalf("precondition install: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err := brokerUnderTest.EndSession(ctx, SessionEndCmd{
+		AccountID: accountID,
+		SessionID: "sess-stale-ondemand",
+		Mode:      lifecycle.OnDemand,
+	})
+	if !errors.Is(err, ErrSessionMismatch) {
+		t.Fatalf("EndSession = %v, want errors.Is ErrSessionMismatch", err)
+	}
+	if discarderFake.callCount() != 0 {
+		t.Errorf("SessionDiscard called %d times on mismatch; want 0 (mismatch short-circuits before discard)", discarderFake.callCount())
 	}
 }
 

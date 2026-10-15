@@ -47,6 +47,13 @@ func (ownerShard *shard) dispatch(cmd Command) {
 		// uninstall_session.go. Account state is NOT touched — persist +
 		// unload happen later via FinalizeMarket at the market's close.
 		ownerShard.handleUninstallSession(typedCmd)
+	case DiscardSession:
+		// On-demand session teardown's drop step. SessionID match + full
+		// drop from sessions and the per-exchange index + Redis snapshot
+		// delete via lifecycle.SessionDiscard; body lives in
+		// discard_session.go. The ephemeral account leaves the shard
+		// entirely — no detach-keep, no later persist.
+		ownerShard.handleDiscardSession(typedCmd)
 	case FinalizeMarketOnShard:
 		// Market-close sweep across every account bound to one
 		// ExchangeID. Persists via lifecycle.SessionSave and unloads.

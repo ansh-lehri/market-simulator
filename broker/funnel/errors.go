@@ -54,24 +54,31 @@ var ErrBadAccountID = errors.New("funnel: SessionEndCmd has empty AccountID")
 // SessionID was empty. Off-shard guard before any routing.
 var ErrBadSessionID = errors.New("funnel: SessionEndCmd has empty SessionID")
 
-// ErrModeNotImplemented — EndSession was called with a Mode this phase
-// does not implement (OnDemand). The on-demand teardown phase replaces
-// this with the discard path; until then an OnDemand call is a wiring
-// bug surface and never lands on a shard.
-var ErrModeNotImplemented = errors.New("funnel: EndSession Mode not implemented in this phase")
-
-// ErrNoLiveSession — handleUninstallSession found no ownedSession for
-// the AccountID. Treat as idempotent on the caller side (the session
-// was already uninstalled, or the account was never installed) rather
-// than as a hard failure.
+// ErrNoLiveSession — handleUninstallSession or handleDiscardSession
+// found no ownedSession for the AccountID. Treat as idempotent on the
+// caller side (the session was already uninstalled/discarded, or the
+// account was never installed) rather than as a hard failure.
 var ErrNoLiveSession = errors.New("funnel: no live session for account")
 
-// ErrSessionMismatch — handleUninstallSession found a live session for
-// the AccountID but its binding.SessionID did not match the command's
-// SessionID. A stale uninstall racing a fresh install, or a conductor
-// retry pointed at a replaced session. Refusal preserves the live
-// binding.
+// ErrSessionMismatch — handleUninstallSession or handleDiscardSession
+// found a live session for the AccountID but its binding.SessionID did
+// not match the command's SessionID. A stale teardown racing a fresh
+// install, or a conductor retry pointed at a replaced session. Refusal
+// preserves the live binding.
 var ErrSessionMismatch = errors.New("funnel: SessionID does not match live session")
+
+// ErrDiscardFailed — on-demand teardown dropped the ephemeral account
+// from the shard's in-memory maps, but the Redis snapshot delete failed
+// (or the shard was built without a session discarder). Category
+// sentinel: callers dispatch with errors.Is; the underlying cause is
+// wrapped via %w and reachable through errors.Unwrap.
+//
+// The shard-side maps are ALREADY clean on this error — a stale Redis
+// key is TTL-cleaned; the account itself is gone from the shard and
+// cannot be retried. The error exists so the caller logs the Redis
+// failure for operability without changing the forward-progress of the
+// teardown.
+var ErrDiscardFailed = errors.New("funnel: on-demand session discard failed")
 
 // ErrFinalizeIncomplete — FinalizeMarket's fan-out across shards
 // completed, but one or more per-shard sweeps surfaced errors. The
