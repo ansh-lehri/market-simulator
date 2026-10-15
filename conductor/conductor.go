@@ -340,6 +340,7 @@ func (conductor *Conductor) MountRoutes(mux *http.ServeMux) {
 	mux.HandleFunc(PathSessionCanonical, conductor.handleJoinCanonical)
 	mux.HandleFunc(PathSessionOnDemand, conductor.handleStartOnDemand)
 	mux.HandleFunc(PathSessionStatus, conductor.handleSessionStatus)
+	mux.HandleFunc(PathSessionCurrent, conductor.handleSessionCurrent)
 	mux.HandleFunc(marketdata.PathWS, conductor.handleWS)
 	mux.HandleFunc(PathMarkets, conductor.handleMarkets)
 	mux.HandleFunc(PathInstruments, conductor.handleInstruments)
@@ -349,6 +350,7 @@ func (conductor *Conductor) MountRoutes(mux *http.ServeMux) {
 		"join_canonical", PathSessionCanonical,
 		"start_ondemand", PathSessionOnDemand,
 		"session_status", PathSessionStatus,
+		"session_current", PathSessionCurrent,
 		"ws", marketdata.PathWS,
 		"markets", PathMarkets,
 		"instruments", PathInstruments,
