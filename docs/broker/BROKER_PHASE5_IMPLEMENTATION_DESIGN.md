@@ -107,7 +107,7 @@ nextOrderID uniqueness holds because hash(AccountID) % N (fixed N) keeps an acco
 
 1.5 Market-buy — the one cache-dependent branch (P5-D3)
 
-Only market-buy needs a price (a market order carries none, and a buy must pre-hold cash before the fill price is known). The broker reads mktCache.BestAsk and sizes SlippageBuffer, and passes both into the reserve.Order — L5 computes requiredCash = BestAsk*Qty + SlippageBuffer internally (economy/reserve/types.go). The broker separately computes the equal maxSpend for FundedOrder.MaxSpend (the exchange's hard cap); reserved == MaxSpend by construction, so exchange staleness is harmless and ReleaseExcess refunds the unspent remainder at settlement. buildReserveOrder maps o.Type==Market → IsMarket; for limits/sells BestAsk/SlippageBuffer are 0 and L5 ignores them (reserves off LimitPrice×Qty or units). The helper is named by role (builds a reserve.Order), not by its downstream layer, per the "no layer or flag IDs in symbol names" rule. Market-buy's runtime is blocked until Point 5 (MarketDataCache) lands; the branch is designed against the BestAsk interface now (option a).
+Only market-buy needs a price (a market order carries none, and a buy must pre-hold cash before the fill price is known). The broker reads mktCache.BestAsk and sizes SlippageBuffer, and passes both into the reserve.Order — L5 computes requiredCash = BestAsk*Qty + SlippageBuffer internally (economy/reserve/types.go). The broker separately computes the equal maxSpend for FundedOrder.MaxSpend (the exchange's hard cap); reserved == MaxSpend by construction, so exchange staleness is harmless and ReleaseExcess refunds the unspent remainder at settlement. buildReserveOrder maps o.Type==Market → IsMarket; for limits/sells BestAsk/SlippageBuffer are 0 and L5 ignores them (reserves off LimitPrice×Qty or units). The helper is named by role (builds a reserve.Order), not by its downstream layer, per the "no layer or flag IDs in symbol names" rule. Market-buy's runtime is blocked until Point 5 (MarketPriceCache) lands; the branch is designed against the BestAsk interface now (option a).
 
 1.6 Ingress / egress
 
@@ -372,7 +372,7 @@ P5-D8 — slippageBuffer sizing — a config-driven parameter (bps of notional),
 P5-D9 — the session instrument set for knownInstrument — must be injected at L7 session-install alongside the binding; not defined in any doc today. Carried (cross-point).
 OrderTrack durability (B9) — Status/CancelInFlight/IsMarketBuy in the account crash snapshot, and crash-resume of the shard OrderID counter (resume past the highest minted seq). Ties into Phase-2 session_save. Carried.
 exitAt session-time alignment — time.Now() is wall-clock and won't match the exchange's session-local candle time under a simulated clock; a proper fix needs the exchange to expose a fill timestamp on EngineResult/Trade (an exchange-contract change). Carried.
-Market-buy runtime — blocked on Point 5 (MarketDataCache.BestAsk); the branch is designed against the interface. Carried (depends on the deferred market-data component).
+Market-buy runtime — blocked on Point 5 (MarketPriceCache.BestAsk); the branch is designed against the interface. Carried (depends on the deferred market-data component).
 B13 rejection notification — a participant-scoped async surface for OutcomeRejected (BROKER_ORDER_LIFECYCLE_intake_punch_settle.md §6.4). Out of scope here.
 9. Cross-doc notes (corrections to the authority docs)
 

@@ -153,7 +153,7 @@ Lot{EntryPrice, EntryAt, RemainingQty} and Position{Available, Reserved, OpenLot
 
 3.1 The market-data-cache dependency (interface now, writer later)
 
-The gross mark needs "last price for this instrument," which comes from the MarketDataCache whose writer is the tape relay (B10, Tier 5 — not built). Per the same pattern Tier-1's market-buy pricing uses, A9 codes against the MarketDataCache interface now; when the cache is cold (Tier 5 absent, or no print yet) the mark is simply unavailable, flagged mark_available:false. A9 is not blocked — position + weighted-avg work fully without LTP; only the mark degrades gracefully.
+The gross mark needs "last price for this instrument on this exchange," which comes from the MarketPriceCache (built in Phase 5 with BestAsk only, extended in Phase 6 with LastPrice — see BROKER_PHASE6_IMPLEMENTATION_DESIGN.md §1.3 P6-D35). Both methods are keyed by (ExchangeID, InstrumentID): the exchange wire does NOT carry ExchangeID (verified against contract/) — the Phase-7 ingestor stamps it on receipt, one goroutine per exchange, same pattern as the settlement consumer. The real writer is the tape relay (B10, Tier 5 — not built). A9 codes against the interface now; when the cache is cold (Tier 5 absent, or no print yet) the mark is simply unavailable, flagged mark_available:false. A9 is not blocked — position + weighted-avg work fully without LTP; only the mark degrades gracefully.
 
 3.2 Compute-on-shard (Option b) — decided
 
@@ -190,7 +190,7 @@ handleReadPositions(cmd):
       if pos.Available == 0 && pos.Reserved == 0: continue        // fully flat → no row
       avg, _ := ComputeWeightedAvgEntry(pos.OpenLots)             // pure
       v := PositionView{Instrument, Qty:pos.Available, ReservedQty:pos.Reserved, WeightedAvgEntry:avg}
-      ltp, ok := s.marketData.LastPrice(instrument)               // cache interface; ok=false if cold
+      ltp, ok := s.mktCache.LastPrice(sess.binding.ExchangeID, instrument)  // (ExchangeID, InstrumentID)-keyed; ok=false if cold
       if ok:
           gross, _ := ComputeUnrealizedMark(pos.OpenLots, ltp, 0) // incurredEntryCosts=0; take GROSS only
           v.MarkAvailable, v.LTP, v.GrossUnrealized = true, ltp, gross
@@ -361,7 +361,7 @@ handleReadObservation(cmd):
   cmd.Reply <- LiveObservation{
       Present:true,
       Cash:      copyCash(sess.Account.Cash),                         // A8 helper
-      Positions: buildPositionViews(sess.Account.Positions, s.marketData), // A9 helper (gross)
+      Positions: buildPositionViews(sess.Account.Positions, s.mktCache, sess.binding.ExchangeID), // A9 helper (gross; LastPrice keyed by ExchangeID + instrument)
       Orders:    buildOrderViews(s.tracks, s.resv, cmd.AccountID),    // A11 helper
   }
 5.7 Merge + shaping — degrade, don't fail
@@ -634,7 +634,7 @@ A9/A14 serve gross-only marks. Net requires an IncurredEntryCosts accumulator on
 11. Tier-4 status summary
 ID	Surface	Status	Source
 A8	Balance read	Designed	live / funnel
-A9	Position read (gross marks)	Designed	live / funnel + MarketDataCache iface
+A9	Position read (gross marks)	Designed	live / funnel + MarketPriceCache iface
 A11	Open-order read	Designed	live / funnel (OrderTrack ⋈ L5 reservation)
 A14	Observation / REACT snapshot	Designed	live funnel ⊕ Postgres (fan-out)
 A10	Trade history / P&L	Designed	Postgres (Store)
@@ -648,5 +648,5 @@ Net-unrealized mark	net paper P&L	Deferred (L5 write-path change)	—
 
 Cross-tier dependencies noted:
 
-A9/A14 live marks depend on the MarketDataCache whose writer is B10 (Tier 5) — coded against the interface now; marks degrade (mark_available:false) until Tier 5 populates it.
+A9/A14 live marks depend on the MarketPriceCache whose writer is B10 (Tier 5) — coded against the interface now; marks degrade (mark_available:false) until Tier 5 populates it.
 Everything account-scoped assumes a live session exists on a shard — session spin-up/tear-down is Tier 3 (paused pending L7). Tier-4 reads return 409 when no live session is present.
