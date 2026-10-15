@@ -319,6 +319,14 @@ func (conductor *Conductor) StartOnDemand(
 		"warmup_ends_at", warmupEndsAt,
 		"session_ends_at", sessionEndsAt,
 	)
+
+	// Spawn the per-session reaper AFTER the Live flip + the stamped
+	// closeAt commit — a reaper firing before closeAt is on the record
+	// would race the finalize's own lock-take and read a zero time.
+	// Spawning here, under no lock, is safe because the reaper's body
+	// takes its own lock when it needs the market record.
+	conductor.spawnOnDemandReaper(marketID, sessionEndsAt)
+
 	return OnDemandResult{
 		Kind:          OnDemandWarmingUp,
 		SessionID:     sessionID,

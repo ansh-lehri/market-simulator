@@ -873,3 +873,117 @@ func TestOnDemandResult_WarmupBeforeSessionEnds(t *testing.T) {
 	}
 }
 
+
+// --- On-demand reaper spawn at finalize ------------------------------
+//
+// The finalize step of StartOnDemand spawns the per-session reaper that
+// fires tearDownOnDemandInstance at the session_ends_at instant. The
+// goroutine is registered on conductor.wg, which lets us observe its
+// existence structurally: before timerQuit is closed, conductor.wg.Wait
+// blocks (reaper is parked in sleepOrQuit); after timerQuit closes, the
+// reaper exits and wg.Wait returns.
+//
+// A failure path that bails before finalize must NOT spawn the reaper
+// — the observable is wg.Wait returning immediately.
+
+// Happy spin-up spawns exactly one reaper. We prove it by racing
+// wg.Wait against a timeout: a non-blocking return means no reaper was
+// parked, which is the regression we guard against. Closing timerQuit
+// then drains the reaper so the test's own cleanup is clean.
+func TestStartOnDemand_FinalizeSpawnsOnDemandReaper(t *testing.T) {
+	harness := newOnDemandHarness(t, "IN")
+	userID := UserID("human-reaper-spawn")
+
+	_, err := harness.conductor.StartOnDemand(context.Background(), userID, "IN", 30)
+	if err != nil {
+		t.Fatalf("StartOnDemand: %v", err)
+	}
+
+	// wg.Wait must block right now — the reaper is in sleepOrQuit
+	// waiting for either its (far-future) Timer or timerQuit.
+	wgDrained := make(chan struct{})
+	go func() {
+		harness.conductor.wg.Wait()
+		close(wgDrained)
+	}()
+	select {
+	case <-wgDrained:
+		t.Fatal("conductor.wg.Wait returned immediately after StartOnDemand — reaper was never spawned at finalize")
+	case <-time.After(50 * time.Millisecond):
+		// Expected — reaper parked in sleepOrQuit.
+	}
+
+	// Close timerQuit directly (the harness's t.Cleanup also closes it
+	// via conductor.Stop, but we want to observe the drain inside this
+	// test). The guard inside Stop handles close-of-closed, so the
+	// cleanup still works.
+	close(harness.conductor.timerQuit)
+	select {
+	case <-wgDrained:
+		// Reaper exited on shutdown signal — the structural proof it
+		// was parked on the shared timerQuit the production spawn
+		// uses.
+	case <-time.After(2 * time.Second):
+		t.Fatal("conductor.wg.Wait did not return after closing timerQuit — reaper did not honor shutdown signal")
+	}
+}
+
+// Install-failure path (post-Start) bails via failOnDemand BEFORE
+// finalize ever runs, so no reaper is spawned. conductor.wg.Wait
+// returns immediately. Regression guard against moving the spawn call
+// above the StartSession seal.
+func TestStartOnDemand_InstallFailure_DoesNotSpawnReaper(t *testing.T) {
+	harness := newOnDemandHarness(t, "IN")
+	harness.broker.startSessionFunc = func(context.Context, funnel.SessionStartCmd) error {
+		return funnel.ErrBrokerTimeout
+	}
+	userID := UserID("human-install-fail-no-reaper")
+
+	_, err := harness.conductor.StartOnDemand(context.Background(), userID, "IN", 30)
+	if err == nil {
+		t.Fatal("expected error on forced StartSession failure")
+	}
+
+	// wg.Wait must return immediately — no reaper was spawned.
+	wgDrained := make(chan struct{})
+	go func() {
+		harness.conductor.wg.Wait()
+		close(wgDrained)
+	}()
+	select {
+	case <-wgDrained:
+		// Expected — no reaper was parked on wg.
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("conductor.wg.Wait blocked after a pre-finalize failure — a reaper was spawned on an error path (regression)")
+	}
+}
+
+// Pre-finalize failure (populate / schedule / specs / EnsureAccount /
+// Qualify) also must not spawn a reaper. Covering one representative
+// pre-finalize failure (EnsureAccount) alongside the post-Start one
+// above is enough regression surface: both arms of failOnDemand +
+// rollbackDeleteOnDemand bail before the finalize block runs.
+func TestStartOnDemand_EnsureAccountFailure_DoesNotSpawnReaper(t *testing.T) {
+	harness := newOnDemandHarness(t, "IN")
+	harness.broker.ensureAccountFunc = func(context.Context, lifecycle.OwnerType, string) (funnel.AccountID, error) {
+		return "", errors.New("scripted ensure-account failure")
+	}
+	userID := UserID("human-ensure-fail-no-reaper")
+
+	_, err := harness.conductor.StartOnDemand(context.Background(), userID, "IN", 30)
+	if err == nil {
+		t.Fatal("expected error on forced EnsureAccount failure")
+	}
+
+	wgDrained := make(chan struct{})
+	go func() {
+		harness.conductor.wg.Wait()
+		close(wgDrained)
+	}()
+	select {
+	case <-wgDrained:
+		// Expected — rollbackDeleteOnDemand bailed well before finalize.
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("conductor.wg.Wait blocked after EnsureAccount failure — a reaper was spawned on an error path (regression)")
+	}
+}

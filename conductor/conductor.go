@@ -266,6 +266,15 @@ func NewConductor(cfg Config) (*Conductor, error) {
 		badConfigRetryDelay: badConfigRetryDelay,
 		closeTimeout:        closeTimeout,
 		wsHandlerFactory:    wsHandlerFactory,
+
+		// timerQuit allocated at construction (not deferred to Start)
+		// so flows that spawn goroutines registered on conductor.wg
+		// WITHOUT going through Start — on-demand bring-up spawns the
+		// per-session reaper directly from StartOnDemand — have a real
+		// channel to select on. A test harness that skips Start would
+		// otherwise leave the reaper parked on a nil channel, and Stop
+		// could not signal shutdown.
+		timerQuit: make(chan struct{}),
 	}
 	log.Info("conductor: constructed",
 		"cfg_dir", cfg.CfgDir,

@@ -503,11 +503,6 @@ func newOnDemandTeardownHarness(t *testing.T) *onDemandTeardownHarness {
 	if err != nil {
 		t.Fatalf("NewConductor: %v", err)
 	}
-	// timerQuit is normally allocated by Conductor.Start. For reaper
-	// tests we allocate it directly so the reaper's sleepOrQuit selects
-	// a real channel rather than falling into the nil-chan "never
-	// fires" branch.
-	conductor.timerQuit = make(chan struct{})
 	harness.conductor = conductor
 	return harness
 }
