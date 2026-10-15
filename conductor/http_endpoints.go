@@ -101,7 +101,7 @@ func joinStatusFor(err error) int {
 	}
 	switch {
 	case errors.Is(err, ErrMarketNotLive),
-		errors.Is(err, ErrAlreadyInSession),
+		errors.Is(err, ErrLiveElsewhere),
 		errors.Is(err, funnel.ErrSessionAlreadyLive):
 		return http.StatusConflict
 	case errors.Is(err, funnel.ErrBrokerTimeout):
