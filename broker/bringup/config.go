@@ -21,6 +21,19 @@ const defaultStoreMaxConns int32 = 4
 // production number — a real deploy sets ReadTimeout explicitly.
 const defaultReadTimeout = 2 * time.Second
 
+// defaultOrderTimeout is the per-request deadline every order HTTP
+// handler (place / cancel / modify) uses when the caller leaves
+// BrokerConfig.OrderTimeout at zero. Same disposition as
+// defaultReadTimeout: tests + demos dial, real deploys set it.
+const defaultOrderTimeout = 2 * time.Second
+
+// defaultTransferTimeout is the per-request deadline the bank-transfer
+// HTTP handler uses when the caller leaves BrokerConfig.TransferTimeout
+// at zero. The transfer handler owns the deadline (BROKER_PHASE3 P3-D4);
+// one ctx bounds both the live shard round-trip AND, on a miss, the
+// durable UPDATE round-trip. Tests + demos dial; real deploys set it.
+const defaultTransferTimeout = 2 * time.Second
+
 // Phase-7 (B10 tape relay + market-data component) tunables. Dials
 // live here so bringup validates once; marketdata.NewMarketData reads
 // marketdata.Config{ReadTimeout} + marketdata.WSConfig{...} composed
@@ -93,6 +106,18 @@ type BrokerConfig struct {
 	// workable default). Negative → ErrBadConfig.
 	ReadTimeout time.Duration
 
+	// OrderTimeout bounds every order HTTP handler's broker round-trip
+	// (place / cancel) and the two-leg compose (modify). Zero →
+	// defaultOrderTimeout, same caller-friendly convention as
+	// ReadTimeout. Negative → ErrBadConfig.
+	OrderTimeout time.Duration
+
+	// TransferTimeout bounds the bank-transfer HTTP handler's broker
+	// round-trip AND the durable fallback (one ctx threads both). Zero
+	// → defaultTransferTimeout, same caller-friendly convention as
+	// ReadTimeout / OrderTimeout. Negative → ErrBadConfig.
+	TransferTimeout time.Duration
+
 	// --- Phase-7 (B10 market-data) tunables ---------------------------
 	// All six fall back to default* consts on zero; validate rejects
 	// negatives. Threaded into marketdata.NewMarketData at bringUp as
@@ -157,6 +182,12 @@ func (brokerCfg BrokerConfig) validate() error {
 	if brokerCfg.ReadTimeout < 0 {
 		return fmt.Errorf("ReadTimeout=%v (must be >= 0; zero means default): %w", brokerCfg.ReadTimeout, ErrBadConfig)
 	}
+	if brokerCfg.OrderTimeout < 0 {
+		return fmt.Errorf("OrderTimeout=%v (must be >= 0; zero means default): %w", brokerCfg.OrderTimeout, ErrBadConfig)
+	}
+	if brokerCfg.TransferTimeout < 0 {
+		return fmt.Errorf("TransferTimeout=%v (must be >= 0; zero means default): %w", brokerCfg.TransferTimeout, ErrBadConfig)
+	}
 	if brokerCfg.CandleReadTimeout < 0 {
 		return fmt.Errorf("CandleReadTimeout=%v (must be >= 0): %w", brokerCfg.CandleReadTimeout, ErrBadConfig)
 	}
@@ -199,6 +230,29 @@ func (brokerCfg BrokerConfig) readTimeoutOrDefault() time.Duration {
 		return defaultReadTimeout
 	}
 	return brokerCfg.ReadTimeout
+}
+
+// orderTimeoutOrDefault returns the configured OrderTimeout, falling
+// back to defaultOrderTimeout on zero. validate() already rejects
+// negatives, so this helper only handles the "zero → default" branch —
+// order.Config.Validate inside each handler constructor requires a
+// strictly-positive value, so we hand it a non-zero number here.
+func (brokerCfg BrokerConfig) orderTimeoutOrDefault() time.Duration {
+	if brokerCfg.OrderTimeout == 0 {
+		return defaultOrderTimeout
+	}
+	return brokerCfg.OrderTimeout
+}
+
+// transferTimeoutOrDefault returns the configured TransferTimeout,
+// falling back to defaultTransferTimeout on zero. validate() rejects
+// negatives; transfer.Config.Validate inside NewHandler requires
+// strictly-positive, so we hand it a non-zero number here.
+func (brokerCfg BrokerConfig) transferTimeoutOrDefault() time.Duration {
+	if brokerCfg.TransferTimeout == 0 {
+		return defaultTransferTimeout
+	}
+	return brokerCfg.TransferTimeout
 }
 
 // --- Phase-7 marketdata zero-to-default accessors ---------------------
