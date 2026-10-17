@@ -283,8 +283,9 @@ func TestBringUp_And_Shutdown_HappyPath_ShardCount1(t *testing.T) {
 // required" (its own first check), never a mux 404. A 404 here would
 // mean the path wasn't registered.
 //
-// Transfer is NOT registered by bringup (see buildMux doc for the
-// cycle rationale), so it is not asserted here.
+// Transfer registration is covered separately below (positive assertion
+// with a POST, since the transfer handler rejects wrong methods with
+// 405 — a GET probe is not representative).
 func TestBringUp_Mux_RegistersAllReadRoutes(t *testing.T) {
 	infraCfg := testInfraCfg(t)
 	runtime, err := bringUp(context.Background(), defaultCfg(), infraCfg)
@@ -377,10 +378,16 @@ func TestBringUp_Mux_DoesNotRegisterWSYet(t *testing.T) {
 	}
 }
 
-// Transfer is NOT registered by bringup — the caller wires it onto
-// runtime.Mux themselves. This test proves the current behaviour so
-// a future change that adds transfer back here breaks loudly.
-func TestBringUp_Mux_DoesNotRegisterTransfer(t *testing.T) {
+// Transfer IS registered by bringup. We confirm positively via a POST
+// with an empty body — the transfer handler's first check is "parse
+// JSON body" (fails → 400 "invalid json body"), never a mux 404. A 404
+// here means the route is not on the mux.
+//
+// A GET probe would hit the handler's method guard (→ 405), which is
+// also distinguishable from 404 but is less representative of the
+// handler's own code path. The POST probe exercises what a real client
+// would send.
+func TestBringUp_Mux_RegistersTransferRoute(t *testing.T) {
 	infraCfg := testInfraCfg(t)
 	runtime, err := bringUp(context.Background(), defaultCfg(), infraCfg)
 	if err != nil {
@@ -391,8 +398,8 @@ func TestBringUp_Mux_DoesNotRegisterTransfer(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "/v1/account/transfer", nil)
 	recorder := httptest.NewRecorder()
 	runtime.Mux.ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusNotFound {
-		t.Fatalf("transfer route unexpectedly registered: status=%d (want 404)", recorder.Code)
+	if recorder.Code == http.StatusNotFound {
+		t.Fatalf("mux returned 404 — transfer route not registered")
 	}
 }
 
