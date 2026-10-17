@@ -61,6 +61,11 @@ func (s *Store) DurableTransfer(ctx, accountID, direction TransferDirection, amo
 
 // Phase-2 additions (BROKER_PHASE2 §2):
 func (s *Store) TradingCash(ctx, accountID AccountID) (int64, error)                             // signed; may be negative
+
+// Pre-session cash view — the signup/login flow needs trading_cash + bank_cash before any
+// market join, but the live balance read requires a session on an owning shard and so cannot
+// answer. This method serves that pre-session case straight from Postgres:
+func (s *Store) AccountCash(ctx, accountID AccountID) (tradingCash int64, bankCash int64, err error)  // signed trading, non-neg bank
 ```
 Types: `TradeRow`, `PnLSummary`, `TradeCostBreakdown`, `CostAggregate`, `Line`, `TransferDirection`.
 Errors: `ErrNoAccount` (a **signal**, not a failure), `ErrLoadFailed`, `ErrBadTransfer`, `ErrInsufficient`.
@@ -105,6 +110,15 @@ Errors: `ErrNoAccount` (a **signal**, not a failure), `ErrLoadFailed`, `ErrBadTr
 - `TradingCash`: single-column `SELECT`; ctx-bound; **zero writes**. `pgx.ErrNoRows` →
   `ErrNoAccount`; other → wrapped `ErrLoadFailed`. Returns the **raw signed value** — Phase-2's
   QualifyOnDemand owns the `>= onDemandMinimum` comparison; the Store does not shape.
+- `AccountCash`: two-column `SELECT (trading_cash, bank_cash)`; ctx-bound; **zero writes**. Same
+  error contract as `TradingCash` (`pgx.ErrNoRows` → `ErrNoAccount`; other → wrapped
+  `ErrLoadFailed`). Returns the **raw signed trading_cash** + non-negative `bank_cash` — no
+  shaping, no comparison. Added for the pre-session cash view the signup/login flow needs: the
+  live `/v1/account/balance` requires a session on an owning shard, so an account with no live
+  session cannot be answered through the live family; `AccountCash` is that off-shard answer.
+  Off-session sole-writer + XOR invariants apply unchanged (`DurableTransfer` is still the only
+  cash mutator off-session, and account-live-XOR-off-session rules out a race against
+  shard-side `MoveCash`).
 - Read behaviour: `n<=0` → `[]` (no query); cap `n` at `maxRecent`; **empty ≠ error**; `before=nil`
   → newest page; keyset pagination on `exit_at` (`next_before` = last row's `exit_at`, null → last
   page); all queries ctx-bound.
@@ -149,8 +163,9 @@ Errors: `ErrNoAccount` (a **signal**, not a failure), `ErrLoadFailed`, `ErrBadTr
 - call `EnqueueClosedTrade` on the Store's Component — closed-trade enqueue is a per-shard
   concern bound to a live `realize` fill, never off-shard;
 - recompute any P&L or cost figure — project stored columns only;
-- shape or compare the `TradingCash` value — return the raw signed int64; comparisons live
-  in the Phase-2 QualifyOnDemand gate;
+- shape or compare the `TradingCash` or `AccountCash` return — return the raw signed int64(s);
+  comparisons and presentation live in the caller (QualifyOnDemand for TradingCash, the
+  `broker/reads` account_cash HTTP handler for AccountCash);
 - drop the `participant_trades` join on the cost reads (there is no `account_id` on `trade_costs`);
 - wrap `DurableTransfer` in a transaction or do a read-then-write;
 - generalize the cost reads beyond India (country dispatch is Phase 6);
@@ -175,6 +190,10 @@ golden-first, no auditor** (pure projections + guarded moves, objective):
   `brokerage=0` drops from the per-trade breakdown.
 - `TradingCash` (Phase 2): positive / zero / **negative** (signed) round-trips; missing row →
   `ErrNoAccount`; pool-closed → `ErrLoadFailed`; zero writes observable.
+- `AccountCash` (pre-session cash view): positive / zero / **signed-negative trading** round-trips
+  on both columns; missing row → `ErrNoAccount`; pool-closed → `ErrLoadFailed` (and
+  **`ErrNoAccount` must not leak onto the transport-failure path** — the two signals stay
+  distinguishable so the HTTP handler can map 404 vs 503); zero writes observable.
 - Bringup integration: Store builds with a live Redis + unstarted Component; `Lifecycle()` is
   non-nil; `Store.Close()` closes redis then pool (idempotent / nil-safe); a second
   `Shutdown()` call is safe (double-close path, same `shutdownOnce` guard).
