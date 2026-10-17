@@ -115,6 +115,11 @@ type stubStore struct {
 	costsAggregateReply store.CostAggregate
 	costsAggregateErr   error
 
+	// AccountCash leg — pre-session trading_cash + bank_cash pair.
+	accountCashTrading int64
+	accountCashBank    int64
+	accountCashErr     error
+
 	// Captured args so tests can assert the handler threaded them
 	// through correctly (pagination cursor, country routing, etc.).
 	tradePageLimit        int
@@ -132,6 +137,15 @@ type stubStore struct {
 	pnlCalls            atomic.Int64
 	costsPerTradeCalls  atomic.Int64
 	costsAggregateCalls atomic.Int64
+	accountCashCalls    atomic.Int64
+}
+
+func (stub *stubStore) AccountCash(ctx context.Context, _ store.AccountID) (int64, int64, error) {
+	stub.accountCashCalls.Add(1)
+	if waitErr := stub.waitOrCancel(ctx); waitErr != nil {
+		return 0, 0, waitErr
+	}
+	return stub.accountCashTrading, stub.accountCashBank, stub.accountCashErr
 }
 
 func (stub *stubStore) RecentTrades(ctx context.Context, _ store.AccountID, _ int) ([]store.TradeRow, error) {
