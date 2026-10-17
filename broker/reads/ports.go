@@ -118,4 +118,15 @@ type storePort interface {
 		ctx context.Context,
 		accountID store.AccountID,
 	) (store.CostAggregate, error)
+
+	// AccountCash returns the durable (trading_cash, bank_cash) pair for
+	// one account — the pre-session cash view. Serves the signup/login
+	// flow where the user has an account_id but no live session yet, so
+	// the live balance read (ReadBalance → 409 without a session) cannot
+	// answer. Pure Postgres read; the Store returns raw signed int64 for
+	// trading_cash (debt is legal) and shaping stays on the HTTP side.
+	AccountCash(
+		ctx context.Context,
+		accountID store.AccountID,
+	) (tradingCash int64, bankCash int64, err error)
 }
