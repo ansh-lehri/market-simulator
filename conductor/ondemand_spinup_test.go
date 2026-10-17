@@ -566,8 +566,17 @@ func TestStartOnDemand_QualifyErrorRollsBack(t *testing.T) {
 	}
 }
 
-// --- Populate failure BEFORE construct: Session=Failed, no exch.Stop -
+// --- Populate failure BEFORE construct: full cleanup, no exch.Stop --
 
+// TestStartOnDemand_PopulateFailedBeforeConstruct asserts the setup-
+// failure path leaves zero registry residue: no session, no byUser
+// slot held, no market record. The 503 response the HTTP layer
+// writes carries the FailReason verbatim, so a Failed-session in
+// the registry adds no information a client could not already read.
+// Full cleanup lets a retry (same user) proceed immediately — the
+// previous retention trapped users in the XOR gate without any
+// mechanism to clear it (the session-end reaper only arms for
+// instances that reached Live).
 func TestStartOnDemand_PopulateFailedBeforeConstruct(t *testing.T) {
 	harness := newOnDemandHarness(t, "IN")
 	harness.agents.returnErr = ErrOrchestratorUnavailable
@@ -595,32 +604,32 @@ func TestStartOnDemand_PopulateFailedBeforeConstruct(t *testing.T) {
 	if harness.broker.startSessionCount() != 0 {
 		t.Errorf("StartSession called = %d, want 0", harness.broker.startSessionCount())
 	}
-	// Session retained as Failed with reason; market record gone; byUser retained.
+	// Full cleanup — zero registry residue.
 	harness.conductor.reg.mu.Lock()
 	defer harness.conductor.reg.mu.Unlock()
-	if len(harness.conductor.reg.sessions) != 1 {
-		t.Fatalf("sessions = %d, want 1 (Failed session retained)", len(harness.conductor.reg.sessions))
+	if len(harness.conductor.reg.sessions) != 0 {
+		t.Errorf("sessions = %d, want 0 (setup-fail must leave no residue)",
+			len(harness.conductor.reg.sessions))
 	}
-	var failedSession *Session
-	for _, s := range harness.conductor.reg.sessions {
-		failedSession = s
+	if len(harness.conductor.reg.byUser) != 0 {
+		t.Errorf("byUser = %d, want 0 (per-user slot must be free so retry can proceed)",
+			len(harness.conductor.reg.byUser))
 	}
-	if failedSession.State != Failed {
-		t.Errorf("session.State = %v, want Failed", failedSession.State)
-	}
-	if !strings.Contains(failedSession.FailReason, "populate_failed") {
-		t.Errorf("session.FailReason = %q, want prefix \"populate_failed\"", failedSession.FailReason)
-	}
-	if harness.conductor.reg.byUser[userID] != failedSession {
-		t.Error("byUser slot must still point at Failed session (fallback status read)")
+	if _, present := harness.conductor.reg.byUser[userID]; present {
+		t.Errorf("byUser[%q] still occupied — retry would hit ErrAlreadyInSession", userID)
 	}
 	if len(harness.conductor.reg.markets) != 0 {
 		t.Errorf("markets = %d, want 0 (market deleted on fail)", len(harness.conductor.reg.markets))
 	}
 }
 
-// --- Install failure AFTER Start: exch.Stop fires, market gone, Session=Failed.
+// --- Install failure AFTER Start: full cleanup + exch.Stop fired ---
 
+// TestStartOnDemand_InstallFailedAfterStart asserts the post-Start
+// failure path still fully cleans the registry AND stops the running
+// exchange. Together those cover both sides of the invariant: the
+// user's slot frees so retry can proceed, AND the goroutines spawned
+// by exch.Start terminate so there's no leak.
 func TestStartOnDemand_InstallFailedAfterStart(t *testing.T) {
 	harness := newOnDemandHarness(t, "IN")
 	harness.broker.startSessionFunc = func(context.Context, funnel.SessionStartCmd) error {
@@ -648,27 +657,101 @@ func TestStartOnDemand_InstallFailedAfterStart(t *testing.T) {
 		t.Errorf("wire counts broker=%d market=%d, want 1 each (both axes wired before Start)",
 			harness.broker.wireCount(), harness.market.wireCount())
 	}
-	// Session Failed, FailReason prefix install_failed, byUser retained, market deleted.
+	// Full cleanup — zero registry residue.
 	harness.conductor.reg.mu.Lock()
 	defer harness.conductor.reg.mu.Unlock()
-	if len(harness.conductor.reg.sessions) != 1 {
-		t.Fatalf("sessions = %d, want 1 (Failed session retained)", len(harness.conductor.reg.sessions))
+	if len(harness.conductor.reg.sessions) != 0 {
+		t.Errorf("sessions = %d, want 0 (setup-fail must leave no residue)",
+			len(harness.conductor.reg.sessions))
 	}
-	var failedSession *Session
-	for _, s := range harness.conductor.reg.sessions {
-		failedSession = s
+	if len(harness.conductor.reg.byUser) != 0 {
+		t.Errorf("byUser = %d, want 0 (per-user slot must be free so retry can proceed)",
+			len(harness.conductor.reg.byUser))
 	}
-	if failedSession.State != Failed {
-		t.Errorf("session.State = %v, want Failed", failedSession.State)
-	}
-	if !strings.Contains(failedSession.FailReason, "install_failed") {
-		t.Errorf("session.FailReason = %q, want prefix \"install_failed\"", failedSession.FailReason)
-	}
-	if harness.conductor.reg.byUser[userID] != failedSession {
-		t.Error("byUser slot must still point at Failed session")
+	if _, present := harness.conductor.reg.byUser[userID]; present {
+		t.Errorf("byUser[%q] still occupied — retry would hit ErrAlreadyInSession", userID)
 	}
 	if len(harness.conductor.reg.markets) != 0 {
 		t.Errorf("markets = %d, want 0 (market record deleted on install_failed)", len(harness.conductor.reg.markets))
+	}
+}
+
+// --- Retry after setup failure is unblocked -------------------------
+
+// TestStartOnDemand_RetryAfterSetupFailureUnblocked exercises the
+// end-to-end user scenario the registry wipe was built to fix: a
+// first trigger that fails during setup must not block the same
+// user's subsequent retry on the per-user XOR gate. Pre-fix, a
+// failed setup left byUser[userID] pointing at a Failed session and
+// the user was stuck in a 409 loop with no cleanup path. Post-fix,
+// the retry proceeds as if the first trigger never happened.
+//
+// Two sub-cases cover the two setup-failure paths (populate-before-
+// construct and install-after-Start) so a regression on either
+// cleanup branch surfaces with the right diagnostic.
+func TestStartOnDemand_RetryAfterSetupFailureUnblocked(t *testing.T) {
+	cases := []struct {
+		name      string
+		forceFail func(*onDemandHarness)
+		clearFail func(*onDemandHarness)
+	}{
+		{
+			name:      "populate_failed (pre-construct)",
+			forceFail: func(h *onDemandHarness) { h.agents.returnErr = ErrOrchestratorUnavailable },
+			clearFail: func(h *onDemandHarness) { h.agents.returnErr = nil },
+		},
+		{
+			name: "install_failed (post-Start)",
+			forceFail: func(h *onDemandHarness) {
+				h.broker.startSessionFunc = func(context.Context, funnel.SessionStartCmd) error {
+					return funnel.ErrBrokerTimeout
+				}
+			},
+			clearFail: func(h *onDemandHarness) { h.broker.startSessionFunc = nil },
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			harness := newOnDemandHarness(t, "IN")
+			userID := UserID("human-retrier")
+
+			// First attempt: force the failure, assert it surfaced as a
+			// setup-phase failure.
+			testCase.forceFail(harness)
+			_, firstErr := harness.conductor.StartOnDemand(context.Background(), userID, "IN", 30)
+			if firstErr == nil {
+				t.Fatal("first StartOnDemand: want error, got nil")
+			}
+			if !errors.Is(firstErr, ErrOnDemandSetupFailed) {
+				t.Fatalf("first err does not wrap ErrOnDemandSetupFailed: %v", firstErr)
+			}
+			// Registry must be fully clean after the failure. The
+			// invariant that unblocks retry is specifically that
+			// byUser[userID] is free — the next trigger would otherwise
+			// hit ErrAlreadyInSession at the XOR gate.
+			harness.conductor.reg.mu.Lock()
+			postFailByUser := len(harness.conductor.reg.byUser)
+			_, slotHeld := harness.conductor.reg.byUser[userID]
+			harness.conductor.reg.mu.Unlock()
+			if postFailByUser != 0 || slotHeld {
+				t.Fatalf("byUser not freed after first failure (count=%d, slotHeld=%v); retry would hit XOR gate",
+					postFailByUser, slotHeld)
+			}
+
+			// Second attempt: clear the fault and retry. Must succeed
+			// without ErrAlreadyInSession.
+			testCase.clearFail(harness)
+			result, secondErr := harness.conductor.StartOnDemand(context.Background(), userID, "IN", 30)
+			if secondErr != nil {
+				if errors.Is(secondErr, ErrAlreadyInSession) {
+					t.Fatalf("retry blocked by XOR gate — byUser was not freed on first failure")
+				}
+				t.Fatalf("retry failed with unexpected error: %v", secondErr)
+			}
+			if result.Kind != OnDemandWarmingUp {
+				t.Errorf("retry result Kind = %v, want OnDemandWarmingUp", result.Kind)
+			}
+		})
 	}
 }
 
