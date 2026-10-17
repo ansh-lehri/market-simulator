@@ -1,17 +1,15 @@
 package transfer
 
-// HTTP integration tests (BROKER_PHASE3 §2.4). Two test flavors:
+// Stub-based HTTP tests (BROKER_PHASE3 §2.4). Fast, no DB: drive the
+// ports with hand-rolled stubs to cover 400 pre-funnel paths, 504
+// timeout, 500 fallthroughs, no-409-ever, panic recovery, and
+// status/body shape symmetry between live-ok and durable-ok (mode-blind).
 //
-//   - Stub-based (fast, no DB): drive the ports with hand-rolled stubs
-//     to cover 400 pre-funnel paths, 504 timeout, 500 fallthroughs, no-
-//     409-ever, panic recovery, and status/body shape symmetry between
-//     the live-ok and durable-ok branches (mode-blind).
-//
-//   - Live runtime (TEST_DATABASE_URL + TEST_REDIS_URL): drive the
-//     real *funnel.Broker + *store.Store through the handler to cover
-//     the live push/pull + idle push/pull + 404 + concurrent transfer
-//     paths. Skips cleanly when the env is unset — same shape as the
-//     funnel/transfer_test.go.
+// Live-runtime tests live in live_integration_test.go under the external
+// `package transfer_test` — they import broker/bringup, which (now that
+// bringup registers the transfer handler on its mux) would create an
+// import cycle if co-located here. External test packages compile
+// separately and break that cycle cleanly.
 //
 // Assertions trace to the Phase-3 §2.4 status table, not to the code's
 // output.
@@ -24,19 +22,13 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
-	"simulator/broker/bringup"
 	"simulator/broker/funnel"
 	"simulator/broker/store"
-	"simulator/connectivity/config"
-	"simulator/contract"
 	"simulator/economy/account"
-	"simulator/economy/lifecycle"
 )
 
 // -------------------------------------------------------------------------
@@ -503,229 +495,4 @@ func TestNewHandler_PanicsOnZeroTimeout(t *testing.T) {
 		}
 	}()
 	_ = NewHandler(&stubBroker{}, &stubStore{}, Config{TransferTimeout: 0})
-}
-
-// -------------------------------------------------------------------------
-// Live-runtime integration — against TEST_DATABASE_URL + TEST_REDIS_URL.
-// Covers the real broker.Transfer + store.DurableTransfer wiring behind
-// the handler. Skips when env is unset.
-// -------------------------------------------------------------------------
-
-const (
-	envTestDBURL    = "TEST_DATABASE_URL"
-	envTestRedisURL = "TEST_REDIS_URL"
-)
-
-func requireLiveRuntime(t *testing.T, startingCapital, startingBank int64) *bringup.Runtime {
-	t.Helper()
-	dbDSN := os.Getenv(envTestDBURL)
-	redisURL := os.Getenv(envTestRedisURL)
-	if dbDSN == "" || redisURL == "" {
-		t.Skipf("%s / %s not set — live-runtime test skipped", envTestDBURL, envTestRedisURL)
-	}
-	infra := config.Config{
-		Postgres: config.PostgresConfig{DSN: dbDSN, PingTimeout: 5 * time.Second, MaxConns: 4},
-		Redis:    config.RedisConfig{URL: redisURL, PingTimeout: 5 * time.Second},
-	}
-	runtime, err := bringup.BringUpForTest(context.Background(), bringup.BrokerConfig{
-		BrokerID:        "B-transfer-http-integ",
-		ShardCount:      1,
-		InboxDepth:      4,
-		Country:         "IN",
-		StartingCapital: startingCapital,
-		StartingBank:    startingBank,
-	}, infra)
-	if err != nil {
-		t.Fatalf("bringUp: %v", err)
-	}
-	t.Cleanup(runtime.Shutdown)
-	return runtime
-}
-
-func cleanupOwner(t *testing.T, runtime *bringup.Runtime, ownerPrefix string) {
-	t.Helper()
-	t.Cleanup(func() {
-		pool := runtime.Store.Pool()
-		if pool == nil {
-			return
-		}
-		ctx := context.Background()
-		likePattern := ownerPrefix + "%"
-		_, _ = pool.Exec(ctx, `DELETE FROM trade_costs WHERE trade_id IN (
-			SELECT pt.trade_id FROM participant_trades pt
-			JOIN accounts acc ON acc.account_id = pt.account_id
-			WHERE acc.owner_id LIKE $1)`, likePattern)
-		_, _ = pool.Exec(ctx, `DELETE FROM participant_trades WHERE account_id IN (
-			SELECT account_id FROM accounts WHERE owner_id LIKE $1)`, likePattern)
-		_, _ = pool.Exec(ctx, `DELETE FROM accounts WHERE owner_id LIKE $1`, likePattern)
-	})
-}
-
-func uniquePrefix(t *testing.T) string {
-	t.Helper()
-	return fmt.Sprintf("httptr-%s-%d", t.Name(), time.Now().UnixNano())
-}
-
-func installLiveSession(t *testing.T, runtime *bringup.Runtime, ownerPrefix string) funnel.AccountID {
-	t.Helper()
-	accountID, err := runtime.Broker.EnsureAccount(context.Background(), lifecycle.OwnerHuman, ownerPrefix+"-owner")
-	if err != nil {
-		t.Fatalf("EnsureAccount: %v", err)
-	}
-	cmd := funnel.SessionStartCmd{
-		AccountID:       accountID,
-		SessionID:       ownerPrefix + "-sess",
-		Mode:            lifecycle.Canonical,
-		ExchangeID:      "X-http-integ",
-		ExchangeInbound: make(chan contract.InboundMessage, 1),
-		Participant:     "P-http-integ",
-	}
-	if err := runtime.Broker.StartSession(context.Background(), cmd); err != nil {
-		t.Fatalf("StartSession: %v", err)
-	}
-	return accountID
-}
-
-func liveHandler(runtime *bringup.Runtime) http.Handler {
-	return NewHandler(runtime.Broker, runtime.Store, Config{TransferTimeout: 5 * time.Second})
-}
-
-// H1 live push via the full stack.
-func TestHTTP_Live_PushSuccess(t *testing.T) {
-	const capital, bank, amount int64 = 10_000, 5_000, 3_000
-	ownerPrefix := uniquePrefix(t)
-	runtime := requireLiveRuntime(t, capital, bank)
-	cleanupOwner(t, runtime, ownerPrefix)
-	accountID := installLiveSession(t, runtime, ownerPrefix)
-
-	status, body := postJSON(t, liveHandler(runtime), map[string]any{
-		"account_id": string(accountID), "direction": "to_bank", "amount": amount,
-	})
-	if status != http.StatusOK {
-		t.Fatalf("status: got %d, want 200 (body=%v)", status, body)
-	}
-	if gotAvailable := int64(body["available"].(float64)); gotAvailable != capital-amount {
-		t.Errorf("available: got %d, want %d", gotAvailable, capital-amount)
-	}
-	if gotBank := int64(body["bank"].(float64)); gotBank != bank+amount {
-		t.Errorf("bank: got %d, want %d", gotBank, bank+amount)
-	}
-}
-
-// H2 live pull via the full stack.
-func TestHTTP_Live_PullSuccess(t *testing.T) {
-	const capital, bank, amount int64 = 10_000, 5_000, 2_000
-	ownerPrefix := uniquePrefix(t)
-	runtime := requireLiveRuntime(t, capital, bank)
-	cleanupOwner(t, runtime, ownerPrefix)
-	accountID := installLiveSession(t, runtime, ownerPrefix)
-
-	status, body := postJSON(t, liveHandler(runtime), map[string]any{
-		"account_id": string(accountID), "direction": "to_trading", "amount": amount,
-	})
-	if status != http.StatusOK {
-		t.Fatalf("status: got %d, want 200 (body=%v)", status, body)
-	}
-	if gotAvailable := int64(body["available"].(float64)); gotAvailable != capital+amount {
-		t.Errorf("available: got %d, want %d", gotAvailable, capital+amount)
-	}
-	if gotBank := int64(body["bank"].(float64)); gotBank != bank-amount {
-		t.Errorf("bank: got %d, want %d", gotBank, bank-amount)
-	}
-}
-
-// H5 idle push via the full stack — EnsureAccount, NO StartSession, call
-// the handler. Must route-first-miss and land on durable, returning the
-// same mode-blind {available, bank} shape as H1.
-func TestHTTP_Live_IdlePush(t *testing.T) {
-	const capital, bank, amount int64 = 10_000, 5_000, 1_000
-	ownerPrefix := uniquePrefix(t)
-	runtime := requireLiveRuntime(t, capital, bank)
-	cleanupOwner(t, runtime, ownerPrefix)
-	accountID, err := runtime.Broker.EnsureAccount(context.Background(), lifecycle.OwnerHuman, ownerPrefix+"-owner")
-	if err != nil {
-		t.Fatalf("EnsureAccount: %v", err)
-	}
-	// NO StartSession — the handler must fall to durable.
-
-	status, body := postJSON(t, liveHandler(runtime), map[string]any{
-		"account_id": string(accountID), "direction": "to_bank", "amount": amount,
-	})
-	if status != http.StatusOK {
-		t.Fatalf("status: got %d, want 200 (body=%v)", status, body)
-	}
-	if _, ok := body["available"]; !ok {
-		t.Errorf("idle 200 body missing 'available': %v", body)
-	}
-	if _, ok := body["bank"]; !ok {
-		t.Errorf("idle 200 body missing 'bank': %v", body)
-	}
-}
-
-// H8 idle unknown account → 404 (durable's ErrNoAccount).
-func TestHTTP_Live_IdleUnknownAccount_404(t *testing.T) {
-	runtime := requireLiveRuntime(t, 0, 0)
-	// no cleanup needed — nothing to insert
-	status, _ := postJSON(t, liveHandler(runtime), map[string]any{
-		"account_id": "acct-does-not-exist",
-		"direction":  "to_bank",
-		"amount":     1,
-	})
-	if status != http.StatusNotFound {
-		t.Fatalf("status: got %d, want 404", status)
-	}
-}
-
-// H15 concurrent transfer + order via the handler — the shard loop
-// serializes; -race is the oracle; final balances must reflect every
-// successful Transfer.
-func TestHTTP_Live_ConcurrentWithPlaceOrder(t *testing.T) {
-	const capital, bank int64 = 100_000, 50_000
-	const iterations = 30
-
-	ownerPrefix := uniquePrefix(t)
-	runtime := requireLiveRuntime(t, capital, bank)
-	cleanupOwner(t, runtime, ownerPrefix)
-	accountID := installLiveSession(t, runtime, ownerPrefix)
-	handler := liveHandler(runtime)
-
-	var waitGroup sync.WaitGroup
-	waitGroup.Add(2)
-	go func() {
-		defer waitGroup.Done()
-		for iteration := 0; iteration < iterations; iteration++ {
-			status, _ := postJSON(t, handler, map[string]any{
-				"account_id": string(accountID), "direction": "to_bank", "amount": 1,
-			})
-			if status != http.StatusOK {
-				t.Errorf("transfer iteration %d: got %d, want 200", iteration, status)
-				return
-			}
-		}
-	}()
-	go func() {
-		defer waitGroup.Done()
-		for iteration := 0; iteration < iterations; iteration++ {
-			if _, err := runtime.Broker.PlaceOrder(context.Background(), accountID, ownerPrefix+"-sess", funnel.OrderSpec{}); err != nil {
-				t.Errorf("placeorder iteration %d: %v", iteration, err)
-				return
-			}
-		}
-	}()
-	waitGroup.Wait()
-
-	// A final 1-coin push verifies every prior Transfer landed on the
-	// shard (no lost commands).
-	status, body := postJSON(t, handler, map[string]any{
-		"account_id": string(accountID), "direction": "to_bank", "amount": 1,
-	})
-	if status != http.StatusOK {
-		t.Fatalf("final probe: got %d, want 200", status)
-	}
-	if gotAvailable := int64(body["available"].(float64)); gotAvailable != capital-iterations-1 {
-		t.Errorf("final available: got %d, want %d (concurrent Transfer lost)", gotAvailable, capital-iterations-1)
-	}
-	if gotBank := int64(body["bank"].(float64)); gotBank != bank+iterations+1 {
-		t.Errorf("final bank: got %d, want %d (concurrent Transfer lost)", gotBank, bank+iterations+1)
-	}
 }
