@@ -9,8 +9,10 @@ import (
 
 	"simulator/broker/funnel"
 	"simulator/broker/marketdata"
+	"simulator/broker/order"
 	"simulator/broker/reads"
 	"simulator/broker/store"
+	"simulator/broker/transfer"
 	"simulator/connectivity/config"
 	"simulator/connectivity/db"
 	"simulator/economy/capstone"
@@ -40,15 +42,16 @@ type Runtime struct {
 	// L7 can reach it.
 	Market *marketdata.MarketData
 
-	// Mux carries the account read routes (eight from broker/reads)
-	// PLUS the Phase-7 GET /v1/candles history route. Exposed as
-	// *http.ServeMux (not http.Handler) so callers can register more
-	// routes on it — health probes, admin surfaces, metrics scraping,
-	// the bank-transfer handler, and L7's own /v1/ws dispatcher. The
-	// bank-transfer handler is deliberately not registered here (see
-	// buildMux below for the cycle rationale); /v1/ws likewise waits
-	// on L7 because the per-session FanOut dispatch is L7's seam, not
-	// marketdata's.
+	// Mux carries every broker-owned HTTP route: the eight account read
+	// routes from broker/reads, the three order write routes from
+	// broker/order, the Phase-7 GET /v1/candles history route from
+	// broker/marketdata, and the Phase-3 POST /v1/account/transfer from
+	// broker/transfer. Exposed as *http.ServeMux (not http.Handler) so
+	// callers can register more routes — health probes, admin surfaces,
+	// metrics scraping, and L7's own /v1/ws dispatcher. /v1/ws is NOT
+	// registered here because the per-session FanOut dispatch is L7's
+	// seam (marketdata/CLAUDE.md explicitly scopes "session→FanOut
+	// binding" out of this component).
 	Mux *http.ServeMux
 
 	bundles []*capstone.Bundle
@@ -231,30 +234,23 @@ func bringUp(ctx context.Context, brokerCfg BrokerConfig, infraCfg config.Config
 }
 
 // buildMux constructs the HTTP mux and registers:
-//   - the eight account read routes from broker/reads
+//   - the nine account read routes from broker/reads
+//   - the three Phase-5 order write routes from broker/order
+//     (POST /v1/orders, /v1/orders/cancel, /v1/orders/modify)
+//   - the Phase-3 POST /v1/account/transfer from broker/transfer
 //   - the Phase-7 GET /v1/candles history route from broker/marketdata
 //
-// The bank-transfer handler is deliberately NOT registered here. Its
-// integration tests already import this package, so pulling
-// broker/transfer in from bringup would introduce a build-time import
-// cycle. The caller wires it with:
+// GET /v1/ws is NOT registered here — the per-session FanOut dispatch is
+// L7's seam (marketdata/CLAUDE.md explicitly scopes "session→FanOut
+// binding" out of this component). L7 will register /v1/ws against its
+// own dispatcher once it exists; the WSConfig for that handler is
+// already held on marketData.WSConfig().
 //
-//     runtime.Mux.Handle(
-//         transfer.Path,
-//         transfer.NewHandler(runtime.Broker, runtime.Store,
-//             transfer.Config{TransferTimeout: cfg.TransferTimeout}),
-//     )
-//
-// after BringUp returns. GET /v1/ws is likewise NOT registered here —
-// the per-session FanOut dispatch is L7's seam (marketdata/CLAUDE.md
-// explicitly scopes "session→FanOut binding" out of this component).
-// L7 will register /v1/ws against its own dispatcher once it exists;
-// the WSConfig for that handler is already held on marketData.WSConfig().
-//
-// Keeping transfer/ws on the caller side is one extra line each at
-// the wiring root in exchange for a clean dependency graph. The reads
-// + marketdata packages have no back-import into bringup, so their
-// handlers can be registered here without any cycle.
+// broker/transfer's live-runtime tests live in `package transfer_test`
+// (external) so bringup can import broker/transfer without an import
+// cycle — the external test package compiles separately and pulls
+// bringup in without pulling the test files into the broker/transfer
+// package's own compilation.
 func buildMux(
 	brokerInstance *funnel.Broker,
 	brokerStore *store.Store,
@@ -262,6 +258,8 @@ func buildMux(
 	brokerCfg BrokerConfig,
 ) *http.ServeMux {
 	readsCfg := reads.Config{ReadTimeout: brokerCfg.readTimeoutOrDefault()}
+	orderCfg := order.Config{OrderTimeout: brokerCfg.orderTimeoutOrDefault()}
+	transferCfg := transfer.Config{TransferTimeout: brokerCfg.transferTimeoutOrDefault()}
 
 	mux := http.NewServeMux()
 	mux.Handle(reads.PathBalance, reads.NewBalanceHandler(brokerInstance, readsCfg))
@@ -272,9 +270,21 @@ func buildMux(
 	mux.Handle(reads.PathPnL, reads.NewPnLHandler(brokerStore, readsCfg))
 	mux.Handle(reads.PathCosts, reads.NewCostsHandler(brokerStore, readsCfg))
 	mux.Handle(reads.PathCostsSummary, reads.NewCostsSummaryHandler(brokerStore, readsCfg))
+	mux.Handle(reads.PathAccountCash, reads.NewAccountCashHandler(brokerStore, readsCfg))
+
+	mux.Handle(order.PlacePath, order.NewPlaceHandler(brokerInstance, orderCfg))
+	mux.Handle(order.CancelPath, order.NewCancelHandler(brokerInstance, orderCfg))
+	mux.Handle(order.ModifyPath, order.NewModifyHandler(brokerInstance, orderCfg))
+
+	mux.Handle(transfer.Path, transfer.NewHandler(brokerInstance, brokerStore, transferCfg))
 
 	marketData.RegisterCandlesRoute(mux)
 
-	slog.Info("bringup: http mux built", "read_routes", 8, "marketdata_routes", 1)
+	slog.Info("bringup: http mux built",
+		"read_routes", 9,
+		"order_routes", 3,
+		"transfer_routes", 1,
+		"marketdata_routes", 1,
+	)
 	return mux
 }
