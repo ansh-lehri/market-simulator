@@ -232,7 +232,7 @@ func (conductor *Conductor) StartOnDemand(
 	bringUpErr := conductor.agents.BringUp(bringUpCtx, tag, OnDemand, instrumentIDs)
 	cancelBringUp()
 	if bringUpErr != nil {
-		conductor.failOnDemand(sessionID, marketID, "populate_failed: "+bringUpErr.Error(), nil)
+		conductor.failOnDemand(sessionID, userID, marketID, "populate_failed: "+bringUpErr.Error(), nil)
 		return OnDemandResult{}, fmt.Errorf("conductor: StartOnDemand: agent bring-up: %w: %w", ErrOnDemandSetupFailed, bringUpErr)
 	}
 
@@ -243,7 +243,7 @@ func (conductor *Conductor) StartOnDemand(
 
 	schedule, scheduleErr := onDemandSchedule(constructInstant, warmupDuration, sessionDuration)
 	if scheduleErr != nil {
-		conductor.failOnDemand(sessionID, marketID, "schedule_invalid: "+scheduleErr.Error(), nil)
+		conductor.failOnDemand(sessionID, userID, marketID, "schedule_invalid: "+scheduleErr.Error(), nil)
 		return OnDemandResult{}, fmt.Errorf("conductor: StartOnDemand: schedule: %w: %w", ErrOnDemandSetupFailed, scheduleErr)
 	}
 
@@ -252,7 +252,7 @@ func (conductor *Conductor) StartOnDemand(
 		marketConfig.Instruments, tag, marketConfig.OHLCVInterval, constructInstant,
 	)
 	if specsErr != nil {
-		conductor.failOnDemand(sessionID, marketID, "specs_failed: "+specsErr.Error(), nil)
+		conductor.failOnDemand(sessionID, userID, marketID, "specs_failed: "+specsErr.Error(), nil)
 		return OnDemandResult{}, fmt.Errorf("conductor: StartOnDemand: build specs: %w: %w", ErrOnDemandSetupFailed, specsErr)
 	}
 
@@ -293,7 +293,7 @@ func (conductor *Conductor) StartOnDemand(
 		Participant:     contract.ParticipantID(participantID),
 	})
 	if startErr != nil {
-		conductor.failOnDemand(sessionID, marketID, "install_failed: "+startErr.Error(), exchangeInstance)
+		conductor.failOnDemand(sessionID, userID, marketID, "install_failed: "+startErr.Error(), exchangeInstance)
 		return OnDemandResult{}, fmt.Errorf("conductor: StartOnDemand: start session: %w: %w", ErrOnDemandSetupFailed, startErr)
 	}
 
@@ -386,13 +386,13 @@ func (conductor *Conductor) rollbackDeleteOnDemand(sessionID SessionID, userID U
 	)
 }
 
-// failOnDemand runs the post-setup failure path: an error landed
-// between Market-create and finalize-Live. Two shapes:
+// failOnDemand runs the post-market-record failure path: an error
+// landed between Market-create and finalize-Live. Two shapes,
+// distinguished by exchangeHandle:
 //
 //   - exchangeHandle == nil: nothing was started (BringUp failed, or
 //     schedule/specs build failed between agent populate and
-//     NewExchange). Just mark the Session Failed and delete the
-//     Market record.
+//     NewExchange). No exchange cleanup needed; just a registry wipe.
 //
 //   - exchangeHandle != nil: the exchange was Started (post-Start
 //     failure in StartSession). Call exch.Stop first — this closes
@@ -401,12 +401,28 @@ func (conductor *Conductor) rollbackDeleteOnDemand(sessionID SessionID, userID U
 //     CacheRegistry.Remove during its exit so the price snapshot is
 //     pruned.
 //
-// byUser is deliberately NOT cleared: the Failed Session stays
-// reachable so a fallback status read surfaces "failed" + reason,
-// and a future recovery pass has something to reconcile. Clearing
-// the Failed session + freeing the per-user slot is a teardown/reap
-// concern that lives outside the spin-up flow.
-func (conductor *Conductor) failOnDemand(sessionID SessionID, marketID MarketID, reason string, exchangeHandle *wire.Exchange) {
+// Then the registry is fully cleaned: session deleted, byUser slot
+// freed, market record dropped. From the user's perspective the
+// session never existed — a retry (same user, same market) is free
+// to proceed because the per-user XOR gate is clear.
+//
+// The surfaced error from StartOnDemand already carries the reason
+// via the %w wrap chain, and the HTTP 503 response body includes it
+// verbatim; nothing is lost by not retaining the Failed record. A
+// client that got a 503 does not need a follow-up status read to
+// learn what went wrong — the trigger response already told them.
+//
+// Historically this function left the Session in Failed state and
+// retained byUser so a (planned, never-built) background reaper
+// could clear it on a short TTL. Without that reaper the retention
+// trapped users in a loop (next attempt hit the XOR gate, exit
+// endpoint refused non-Active sessions). The reaper that did ship
+// handles session-end for Live instances, not setup-failure. The
+// clean fix is to remove the retention — this function now treats
+// setup-fail the same shape as rollbackDeleteOnDemand treats
+// pre-setup fail, with the extra exchange-stop step for the
+// post-Start case.
+func (conductor *Conductor) failOnDemand(sessionID SessionID, userID UserID, marketID MarketID, reason string, exchangeHandle *wire.Exchange) {
 	if exchangeHandle != nil {
 		exchangeHandle.Stop()
 		conductor.log.Info("conductor: StartOnDemand stopped exchange after post-start failure",
@@ -416,14 +432,15 @@ func (conductor *Conductor) failOnDemand(sessionID SessionID, marketID MarketID,
 	}
 	conductor.reg.mu.Lock()
 	reservedSession := conductor.reg.sessions[sessionID]
-	if reservedSession != nil {
-		reservedSession.State = Failed
-		reservedSession.FailReason = reason
+	delete(conductor.reg.sessions, sessionID)
+	if reservedSession != nil && conductor.reg.byUser[userID] == reservedSession {
+		delete(conductor.reg.byUser, userID)
 	}
 	delete(conductor.reg.markets, marketID)
 	conductor.reg.mu.Unlock()
-	conductor.log.Error("conductor: StartOnDemand setup failed",
+	conductor.log.Error("conductor: StartOnDemand setup failed — session + market fully cleaned",
 		"session_id", sessionID,
+		"user", userID,
 		"market_id", marketID,
 		"reason", reason,
 		"exchange_stopped", exchangeHandle != nil,
