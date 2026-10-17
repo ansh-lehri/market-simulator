@@ -48,8 +48,13 @@ lock→finalize→unlock. A lock held across a call-out freezes the whole regist
 why (a WS connection blocks its request goroutine for its whole life).
 
 ## Two walls every endpoint respects (from Tier-0 / HTTP-surface)
-- **Money-blind** — L7 may **not** read the money tables. `account/open` returns only the `account_id`
-  handle; balance/trades/P&L are the broker's shipped `/v1/account/*` reads the frontend calls directly.
+- **Money-blind** — the conductor may **not** read the money tables. `account/open` returns only the
+  `account_id` handle; balance/trades/P&L are the broker's shipped `/v1/account/*` reads the frontend
+  calls directly. The **pre-session cash view** (user signed up/logged in but has not joined a market
+  yet, so the live `/v1/account/balance` would 409) is also a broker read:
+  **`GET /v1/account/cash?account_id=X` → `{trading_cash, bank_cash}`** — pure durable Postgres read in
+  `broker/reads`, 404 on an unknown account_id, 503 on store failure. Keeps money-blind intact: the
+  conductor never touches the money tables, even for the pre-session case.
 - **H.8 — L7 returns session/market *identity + metadata*, never market data.** Catalog, instrument
   list, session windows = L7's. Prices (LTP/quote/depth) stream over the shipped market-data WS; L7
   never serves them.
