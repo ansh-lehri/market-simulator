@@ -27,8 +27,8 @@ func TestStubAgentOrchestrator_SeedProducesDeterministicSequence(t *testing.T) {
 	firstSequence := make([]error, 100)
 	secondSequence := make([]error, 100)
 	for callIndex := 0; callIndex < 100; callIndex++ {
-		firstSequence[callIndex] = firstStub.BringUp(context.Background(), "IN", Canonical, nil)
-		secondSequence[callIndex] = secondStub.BringUp(context.Background(), "IN", Canonical, nil)
+		firstSequence[callIndex] = firstStub.BringUp(context.Background(), AgentBringUpRequest{Market: "IN", Mode: Canonical})
+		secondSequence[callIndex] = secondStub.BringUp(context.Background(), AgentBringUpRequest{Market: "IN", Mode: Canonical})
 	}
 	for callIndex, firstErr := range firstSequence {
 		secondErr := secondSequence[callIndex]
@@ -44,7 +44,7 @@ func TestStubAgentOrchestrator_SeedProducesDeterministicSequence(t *testing.T) {
 func TestStubAgentOrchestrator_ReturnsEveryOutcomeOverManyCalls(t *testing.T) {
 	stub := newStubAgentOrchestrator(nil, stubTestSeed)
 	for callIndex := 0; callIndex < callCountForDistribution; callIndex++ {
-		_ = stub.BringUp(context.Background(), "IN", Canonical, []contract.InstrumentID{"RELIANCE"})
+		_ = stub.BringUp(context.Background(), AgentBringUpRequest{Market: "IN", Mode: Canonical, Instruments: []contract.InstrumentID{"RELIANCE"}})
 	}
 	counts := stub.outcomeCountsSnapshot()
 
@@ -78,7 +78,7 @@ func TestStubAgentOrchestrator_RespectsAlreadyCancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	err := stub.BringUp(ctx, "IN", Canonical, nil)
+	err := stub.BringUp(ctx, AgentBringUpRequest{Market: "IN", Mode: Canonical})
 	if !errors.Is(err, ErrOrchestratorTimeout) {
 		t.Fatalf("BringUp with pre-cancelled ctx returned %v, want error that Is(ErrOrchestratorTimeout)", err)
 	}
@@ -147,7 +147,7 @@ func TestStubAgentOrchestrator_SubstitutesSlogDefaultWhenLogNil(t *testing.T) {
 	// slog.Default. Any outcome exercises the log branches.
 	stub := newStubAgentOrchestrator(nil, stubTestSeed)
 	for callIndex := 0; callIndex < 50; callIndex++ {
-		_ = stub.BringUp(context.Background(), "IN", Canonical, nil)
+		_ = stub.BringUp(context.Background(), AgentBringUpRequest{Market: "IN", Mode: Canonical})
 	}
 }
 
@@ -168,8 +168,8 @@ func TestStubAgentOrchestrator_SeedZeroFallsBackToClock(t *testing.T) {
 
 	var firstDiffer, secondDiffer bool
 	for callIndex := 0; callIndex < 10; callIndex++ {
-		firstErr := firstStub.BringUp(context.Background(), "IN", Canonical, nil)
-		secondErr := secondStub.BringUp(context.Background(), "IN", Canonical, nil)
+		firstErr := firstStub.BringUp(context.Background(), AgentBringUpRequest{Market: "IN", Mode: Canonical})
+		secondErr := secondStub.BringUp(context.Background(), AgentBringUpRequest{Market: "IN", Mode: Canonical})
 		if (firstErr == nil) != (secondErr == nil) {
 			firstDiffer = true
 		}
