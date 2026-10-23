@@ -87,7 +87,7 @@ func (conductor *Conductor) spinUpCanonical(ctx context.Context, marketTag Marke
 	)
 
 	// ---- Build args off-lock (any error → abort) ----
-	numShards, schedule, specs, _, closeInstant, buildErr := buildExchangeArgs(
+	numShards, schedule, specs, openInstant, closeInstant, buildErr := buildExchangeArgs(
 		ctx, conductor.referenceReader, conductor.now, marketConfig, location,
 	)
 	if buildErr != nil {
@@ -106,7 +106,14 @@ func (conductor *Conductor) spinUpCanonical(ctx context.Context, marketTag Marke
 	// ---- Seed BEFORE wire: a failure here has nothing to tear down ----
 	bringUpCtx, cancelBringUp := context.WithTimeout(ctx, conductor.bringUpTimeout)
 	defer cancelBringUp()
-	bringUpErr := conductor.agents.BringUp(bringUpCtx, marketTag, Canonical, instrumentIDsFrom(specs))
+	bringUpErr := conductor.agents.BringUp(bringUpCtx, AgentBringUpRequest{
+		Market:       marketTag,
+		ExchangeID:   marketID,
+		Mode:         Canonical,
+		SessionStart: openInstant,
+		SessionEnd:   closeInstant,
+		Instruments:  instrumentIDsFrom(specs),
+	})
 	if bringUpErr != nil {
 		conductor.abortProvisioning(marketID, bringUpErr)
 		return "", fmt.Errorf("conductor: spinUpCanonical: agent bring-up: %w", bringUpErr)
