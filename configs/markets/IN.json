@@ -1,0 +1,29 @@
+{
+  "market": "IN",
+  "timezone": "Asia/Kolkata",
+  "ohlcv_interval": "1m",
+  "num_shards": 1,
+  "preopen_lead": "15m",
+  "session": [
+    {"at": "09:15", "phase": "continuous"},
+    {"at": "15:30", "phase": "closing_auction"},
+    {"at": "15:40", "phase": "closed"}
+  ],
+  "ondemand": {"duration": "60m", "warmup": "2m"},
+  "instruments": [
+    {
+      "id": "ACME",
+      "tick_size": 5,
+      "band_bps": 1000,
+      "seed_price": 10000,
+      "liquidity": {"levels": 5, "spacing_pct": 0.1, "near_qty": 100, "taper": 0.5}
+    },
+    {
+      "id": "BETA",
+      "tick_size": 10,
+      "band_bps": 1500,
+      "seed_price": 25000,
+      "liquidity": {"levels": 5, "spacing_pct": 0.15, "near_qty": 50, "taper": 0.4}
+    }
+  ]
+}
