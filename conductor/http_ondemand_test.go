@@ -76,6 +76,153 @@ func TestParseOnDemandDuration(t *testing.T) {
 	}
 }
 
+// --- parsePracticeCondition unit table ---------------------------------
+
+func TestParsePracticeCondition(t *testing.T) {
+	cases := []struct {
+		name    string
+		raw     string
+		want    string
+		wantErr bool
+	}{
+		{"empty is legal (no condition requested)", "", "", false},
+		{"normal_day accepted", "normal_day", "normal_day", false},
+		{"calm_range accepted", "calm_range", "calm_range", false},
+		{"trending_day accepted", "trending_day", "trending_day", false},
+		{"whipsaw accepted", "whipsaw", "whipsaw", false},
+		{"unstable_day accepted", "unstable_day", "unstable_day", false},
+		{"thin_liquidity accepted", "thin_liquidity", "thin_liquidity", false},
+		{"unknown value rejected", "volcano", "", true},
+		{"wrong case rejected", "Whipsaw", "", true},
+	}
+	allowed := buildPracticeConditionSet(defaultPracticeConditions)
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			got, err := parsePracticeCondition(testCase.raw, allowed)
+			if testCase.wantErr {
+				if err == nil {
+					t.Fatalf("parsePracticeCondition(%q) = %q, nil — want error", testCase.raw, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parsePracticeCondition(%q) = _, %v — want nil", testCase.raw, err)
+			}
+			if got != testCase.want {
+				t.Errorf("parsePracticeCondition(%q) = %q, want %q", testCase.raw, got, testCase.want)
+			}
+		})
+	}
+}
+
+// --- condition field end-to-end through the HTTP handler ---------------
+
+func TestHandleStartOnDemand_UnknownConditionReturns400(t *testing.T) {
+	harness := newOnDemandHarness(t, "IN")
+	body := `{"user":{"user_id":"human-cond-bad"},"condition":"volcano"}`
+	recorder := postOnDemand(t, harness.conductor, http.MethodPost, "market=IN&duration=30", body)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400. body=%q", recorder.Code, recorder.Body.String())
+	}
+	assertErrorBody(t, recorder)
+	if harness.agents.callCount != 0 {
+		t.Errorf("agents.BringUp calls = %d, want 0 (bad condition must reject before setup)", harness.agents.callCount)
+	}
+}
+
+func TestHandleStartOnDemand_ConditionReachesAgentBringUpRequest(t *testing.T) {
+	harness := newOnDemandHarness(t, "IN")
+	body := `{"user":{"user_id":"human-cond-good"},"condition":"whipsaw"}`
+	recorder := postOnDemand(t, harness.conductor, http.MethodPost, "market=IN&duration=30", body)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200. body=%q", recorder.Code, recorder.Body.String())
+	}
+	gotRequest := harness.agents.lastRequestSnapshot()
+	if gotRequest.Scenario != "whipsaw" {
+		t.Errorf("AgentBringUpRequest.Scenario = %q, want %q", gotRequest.Scenario, "whipsaw")
+	}
+}
+
+// TestHandleStartOnDemand_PracticeConditionAllowlistIsConfigurable
+// proves Config.PracticeConditions genuinely overrides the default set
+// — the whole reason this isn't a fixed package-level list — by
+// building a Conductor with a custom, single-value allowlist and
+// checking that: (a) a value outside it is rejected even though it's
+// one of the frontend contract's six default values, and (b) the one
+// value the override DOES allow is accepted even though it is not in
+// defaultPracticeConditions at all.
+func TestHandleStartOnDemand_PracticeConditionAllowlistIsConfigurable(t *testing.T) {
+	marketTag := MarketTag("IN")
+	cfgDir := t.TempDir()
+	writeTestMarketConfig(t, cfgDir, marketTag)
+
+	sequencer := &callSequencer{}
+	broker := &fakeOnDemandBroker{fakeJoinBroker: &fakeJoinBroker{}}
+	market := &fakeOnDemandMarket{fanoutMarketTag: marketTag}
+	agents := &recordingAgents{sequencer: sequencer}
+	liquidity := &recordingLiquidity{sequencer: sequencer}
+	exchFactory := &recordingExchangeFactory{sequencer: sequencer}
+	pool := newUnconnectedPool(t)
+
+	customCondition := "beta_test_only"
+	conductor, err := NewConductor(Config{
+		CfgDir:             cfgDir,
+		OHLCVPool:          pool,
+		Broker:             broker,
+		Market:             market,
+		Exchange:           exchFactory,
+		Agents:             agents,
+		Liquidity:          liquidity,
+		Now:                func() time.Time { return onDemandFixedNow },
+		PracticeConditions: []string{customCondition},
+	})
+	if err != nil {
+		t.Fatalf("NewConductor: %v", err)
+	}
+	conductor.referenceReader = readerReturningClose(251575)
+	t.Cleanup(func() {
+		exchFactory.stopAll()
+		broker.wireDrainWG.Wait()
+		market.wireDrainWG.Wait()
+		conductor.Stop()
+	})
+
+	// A default-list value ("whipsaw") is rejected because the override
+	// replaced the whole list, not appended to it.
+	rejected := postOnDemand(t, conductor, http.MethodPost,
+		"market=IN&duration=30", `{"user":{"user_id":"human-override-1"},"condition":"whipsaw"}`)
+	if rejected.Code != http.StatusBadRequest {
+		t.Fatalf("whipsaw against custom allowlist: status = %d, want 400. body=%q",
+			rejected.Code, rejected.Body.String())
+	}
+
+	// The override's own value is accepted and still reaches Scenario.
+	accepted := postOnDemand(t, conductor, http.MethodPost,
+		"market=IN&duration=30", `{"user":{"user_id":"human-override-2"},"condition":"beta_test_only"}`)
+	if accepted.Code != http.StatusOK {
+		t.Fatalf("custom condition: status = %d, want 200. body=%q", accepted.Code, accepted.Body.String())
+	}
+	if got := agents.lastRequestSnapshot().Scenario; got != customCondition {
+		t.Errorf("AgentBringUpRequest.Scenario = %q, want %q", got, customCondition)
+	}
+}
+
+func TestHandleStartOnDemand_OmittedConditionLeavesScenarioEmpty(t *testing.T) {
+	harness := newOnDemandHarness(t, "IN")
+	recorder := postOnDemand(t, harness.conductor, http.MethodPost,
+		"market=IN&duration=30", standardOnDemandBody("human-cond-none"))
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200. body=%q", recorder.Code, recorder.Body.String())
+	}
+	gotRequest := harness.agents.lastRequestSnapshot()
+	if gotRequest.Scenario != "" {
+		t.Errorf("AgentBringUpRequest.Scenario = %q, want empty (condition omitted)", gotRequest.Scenario)
+	}
+}
+
 // --- Happy path -------------------------------------------------------
 
 func TestHandleStartOnDemand_HappyPath(t *testing.T) {
