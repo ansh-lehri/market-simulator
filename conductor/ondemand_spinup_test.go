@@ -231,7 +231,7 @@ func TestStartOnDemand_HappyPath(t *testing.T) {
 	userID := UserID("human-happy-ondemand")
 	durationMinutes := 35
 
-	result, err := harness.conductor.StartOnDemand(context.Background(), userID, "IN", durationMinutes)
+	result, err := harness.conductor.StartOnDemand(context.Background(), userID, "IN", durationMinutes, "")
 	if err != nil {
 		t.Fatalf("StartOnDemand: %v", err)
 	}
@@ -387,7 +387,7 @@ func TestStartOnDemand_GateNO_InsufficientFunds(t *testing.T) {
 	}
 	userID := UserID("human-poor")
 
-	result, err := harness.conductor.StartOnDemand(context.Background(), userID, "IN", 60)
+	result, err := harness.conductor.StartOnDemand(context.Background(), userID, "IN", 60, "")
 	if err != nil {
 		t.Fatalf("StartOnDemand: want nil error on gate NO, got %v", err)
 	}
@@ -431,10 +431,10 @@ func TestStartOnDemand_XORFrontGate(t *testing.T) {
 	harness := newOnDemandHarness(t, "IN")
 	userID := UserID("human-dup")
 
-	if _, firstErr := harness.conductor.StartOnDemand(context.Background(), userID, "IN", 30); firstErr != nil {
+	if _, firstErr := harness.conductor.StartOnDemand(context.Background(), userID, "IN", 30, ""); firstErr != nil {
 		t.Fatalf("first StartOnDemand: %v", firstErr)
 	}
-	_, secondErr := harness.conductor.StartOnDemand(context.Background(), userID, "IN", 30)
+	_, secondErr := harness.conductor.StartOnDemand(context.Background(), userID, "IN", 30, "")
 	if !errors.Is(secondErr, ErrAlreadyInSession) {
 		t.Fatalf("second StartOnDemand err = %v, want ErrAlreadyInSession", secondErr)
 	}
@@ -474,7 +474,7 @@ func TestStartOnDemand_CrossModeXORBlocksSecondTrigger(t *testing.T) {
 	harness.conductor.reg.byUser[userID] = existingSession
 	harness.conductor.reg.mu.Unlock()
 
-	_, err := harness.conductor.StartOnDemand(context.Background(), userID, "IN", 30)
+	_, err := harness.conductor.StartOnDemand(context.Background(), userID, "IN", 30, "")
 	if !errors.Is(err, ErrAlreadyInSession) {
 		t.Fatalf("err = %v, want ErrAlreadyInSession", err)
 	}
@@ -505,7 +505,7 @@ func TestStartOnDemand_EnsureAccountErrorRollsBack(t *testing.T) {
 				return "", forcedErr
 			}
 
-			_, err := harness.conductor.StartOnDemand(context.Background(), UserID("human-e"), "IN", 30)
+			_, err := harness.conductor.StartOnDemand(context.Background(), UserID("human-e"), "IN", 30, "")
 			if !errors.Is(err, forcedErr) {
 				t.Fatalf("err = %v, want wrap of %v", err, forcedErr)
 			}
@@ -539,7 +539,7 @@ func TestStartOnDemand_QualifyErrorRollsBack(t *testing.T) {
 		return false, driverFailure
 	}
 
-	_, err := harness.conductor.StartOnDemand(context.Background(), UserID("human-q"), "IN", 30)
+	_, err := harness.conductor.StartOnDemand(context.Background(), UserID("human-q"), "IN", 30, "")
 	if !errors.Is(err, driverFailure) {
 		t.Fatalf("err = %v, want wrap of %v", err, driverFailure)
 	}
@@ -582,7 +582,7 @@ func TestStartOnDemand_PopulateFailedBeforeConstruct(t *testing.T) {
 	harness.agents.returnErr = ErrOrchestratorUnavailable
 	userID := UserID("human-populate-fail")
 
-	_, err := harness.conductor.StartOnDemand(context.Background(), userID, "IN", 30)
+	_, err := harness.conductor.StartOnDemand(context.Background(), userID, "IN", 30, "")
 	if err == nil {
 		t.Fatal("expected error on forced BringUp failure")
 	}
@@ -637,7 +637,7 @@ func TestStartOnDemand_InstallFailedAfterStart(t *testing.T) {
 	}
 	userID := UserID("human-install-fail")
 
-	_, err := harness.conductor.StartOnDemand(context.Background(), userID, "IN", 30)
+	_, err := harness.conductor.StartOnDemand(context.Background(), userID, "IN", 30, "")
 	if err == nil {
 		t.Fatal("expected error on forced StartSession failure")
 	}
@@ -718,7 +718,7 @@ func TestStartOnDemand_RetryAfterSetupFailureUnblocked(t *testing.T) {
 			// First attempt: force the failure, assert it surfaced as a
 			// setup-phase failure.
 			testCase.forceFail(harness)
-			_, firstErr := harness.conductor.StartOnDemand(context.Background(), userID, "IN", 30)
+			_, firstErr := harness.conductor.StartOnDemand(context.Background(), userID, "IN", 30, "")
 			if firstErr == nil {
 				t.Fatal("first StartOnDemand: want error, got nil")
 			}
@@ -741,7 +741,7 @@ func TestStartOnDemand_RetryAfterSetupFailureUnblocked(t *testing.T) {
 			// Second attempt: clear the fault and retry. Must succeed
 			// without ErrAlreadyInSession.
 			testCase.clearFail(harness)
-			result, secondErr := harness.conductor.StartOnDemand(context.Background(), userID, "IN", 30)
+			result, secondErr := harness.conductor.StartOnDemand(context.Background(), userID, "IN", 30, "")
 			if secondErr != nil {
 				if errors.Is(secondErr, ErrAlreadyInSession) {
 					t.Fatalf("retry blocked by XOR gate — byUser was not freed on first failure")
@@ -768,7 +768,7 @@ func TestStartOnDemand_SeedLiquidityNeverCalled(t *testing.T) {
 	harness := newOnDemandHarness(t, "IN")
 	userID := UserID("human-noseed")
 
-	_, err := harness.conductor.StartOnDemand(context.Background(), userID, "IN", 30)
+	_, err := harness.conductor.StartOnDemand(context.Background(), userID, "IN", 30, "")
 	if err != nil {
 		t.Fatalf("StartOnDemand: %v", err)
 	}
@@ -796,7 +796,7 @@ func TestStartOnDemand_DispatcherResolvesOnDemand(t *testing.T) {
 	harness := newOnDemandHarness(t, "IN")
 	userID := UserID("human-dispatch")
 
-	result, err := harness.conductor.StartOnDemand(context.Background(), userID, "IN", 30)
+	result, err := harness.conductor.StartOnDemand(context.Background(), userID, "IN", 30, "")
 	if err != nil {
 		t.Fatalf("StartOnDemand: %v", err)
 	}
@@ -862,7 +862,7 @@ func TestStartOnDemand_LockReleasedAcrossCallOuts(t *testing.T) {
 	// shim-ports installed just for this test.
 	harness.conductor.agents = probingAgents{inner: harness.agents, probe: func() { recordProbe("agents.BringUp") }}
 
-	_, err := harness.conductor.StartOnDemand(context.Background(), UserID("human-probe"), "IN", 30)
+	_, err := harness.conductor.StartOnDemand(context.Background(), UserID("human-probe"), "IN", 30, "")
 	if err != nil {
 		t.Fatalf("StartOnDemand: %v", err)
 	}
@@ -901,13 +901,13 @@ type probingAgents struct {
 	probe func()
 }
 
-func (p probingAgents) BringUp(ctx context.Context, market MarketTag, mode Mode, instruments []contract.InstrumentID) error {
+func (p probingAgents) BringUp(ctx context.Context, request AgentBringUpRequest) error {
 	p.probe()
-	return p.inner.BringUp(ctx, market, mode, instruments)
+	return p.inner.BringUp(ctx, request)
 }
 
-func (p probingAgents) WindDown(market MarketTag, mode Mode) {
-	p.inner.WindDown(market, mode)
+func (p probingAgents) WindDown(ctx context.Context, exchangeID MarketID, market MarketTag, mode Mode) error {
+	return p.inner.WindDown(ctx, exchangeID, market, mode)
 }
 
 // --- Config load failure before any reserve --------------------------
@@ -915,7 +915,7 @@ func (p probingAgents) WindDown(market MarketTag, mode Mode) {
 func TestStartOnDemand_UnknownTag_FailsBeforeReserve(t *testing.T) {
 	harness := newOnDemandHarness(t, "IN")
 
-	_, err := harness.conductor.StartOnDemand(context.Background(), UserID("human-badtag"), "ZZZ", 30)
+	_, err := harness.conductor.StartOnDemand(context.Background(), UserID("human-badtag"), "ZZZ", 30, "")
 	if err == nil {
 		t.Fatal("expected error for unknown tag")
 	}
@@ -941,7 +941,7 @@ func TestOnDemandResult_WarmupBeforeSessionEnds(t *testing.T) {
 	harness := newOnDemandHarness(t, "IN")
 	durationMinutes := 42
 
-	result, err := harness.conductor.StartOnDemand(context.Background(), UserID("human-math"), "IN", durationMinutes)
+	result, err := harness.conductor.StartOnDemand(context.Background(), UserID("human-math"), "IN", durationMinutes, "")
 	if err != nil {
 		t.Fatalf("StartOnDemand: %v", err)
 	}
@@ -977,7 +977,7 @@ func TestStartOnDemand_FinalizeSpawnsOnDemandReaper(t *testing.T) {
 	harness := newOnDemandHarness(t, "IN")
 	userID := UserID("human-reaper-spawn")
 
-	_, err := harness.conductor.StartOnDemand(context.Background(), userID, "IN", 30)
+	_, err := harness.conductor.StartOnDemand(context.Background(), userID, "IN", 30, "")
 	if err != nil {
 		t.Fatalf("StartOnDemand: %v", err)
 	}
@@ -1022,7 +1022,7 @@ func TestStartOnDemand_InstallFailure_DoesNotSpawnReaper(t *testing.T) {
 	}
 	userID := UserID("human-install-fail-no-reaper")
 
-	_, err := harness.conductor.StartOnDemand(context.Background(), userID, "IN", 30)
+	_, err := harness.conductor.StartOnDemand(context.Background(), userID, "IN", 30, "")
 	if err == nil {
 		t.Fatal("expected error on forced StartSession failure")
 	}
@@ -1053,7 +1053,7 @@ func TestStartOnDemand_EnsureAccountFailure_DoesNotSpawnReaper(t *testing.T) {
 	}
 	userID := UserID("human-ensure-fail-no-reaper")
 
-	_, err := harness.conductor.StartOnDemand(context.Background(), userID, "IN", 30)
+	_, err := harness.conductor.StartOnDemand(context.Background(), userID, "IN", 30, "")
 	if err == nil {
 		t.Fatal("expected error on forced EnsureAccount failure")
 	}
