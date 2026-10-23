@@ -100,8 +100,16 @@ func (conductor *Conductor) closeCanonicalMarket(ctx context.Context, marketID M
 		)
 	}
 
-	// ---- OFF-LOCK: agent wind-down (fire-and-forget) ----
-	conductor.agents.WindDown(marketTag, Canonical)
+	// ---- OFF-LOCK: agent wind-down ----
+	// Forward-progress on error, same as FinalizeMarket above: the
+	// close must still reach exchange.Stop + reap regardless of
+	// whether the orchestrator acknowledged the wind-down.
+	if windDownErr := conductor.agents.WindDown(ctx, marketID, marketTag, Canonical); windDownErr != nil {
+		conductor.log.Error("conductor: closeCanonicalMarket agents.WindDown failed; proceeding to exchange stop",
+			"market_id", marketID,
+			"err", windDownErr,
+		)
+	}
 
 	// ---- OFF-LOCK: exchange stop ----
 	// The shipped exchange.Stop() is idempotent and safe without a
