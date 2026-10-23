@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"net/http"
 	"strconv"
@@ -58,8 +59,79 @@ const (
 // joinRequestUser from http_endpoints.go so the frontend sends the
 // same identity packet to canonical join and on-demand triggers; one
 // shape, one validation path, zero divergence.
+//
+// Condition is the optional "practice condition" the frontend's
+// contract (contract/openapi.yaml in synthetic-mkt-ui, PracticeCondition
+// schema) added to OnDemandRequest. Omitted entirely by the frontend
+// when the user didn't pick one (not sent as null/""). This decoder is
+// plain json.Decode (no DisallowUnknownFields), so an older frontend
+// build that never sends this field continues to decode exactly as
+// before — adding a recognized field here is backward compatible by
+// construction.
 type onDemandRequestBody struct {
-	User joinRequestUser `json:"user"`
+	User      joinRequestUser `json:"user"`
+	Condition string          `json:"condition,omitempty"`
+}
+
+// Practice-condition wire values. Mirrors the frontend/contract's
+// PracticeCondition enum as of this writing (contract/openapi.yaml in
+// synthetic-mkt-ui) — but that enum is explicitly NOT locked/final, so
+// this package never hardcodes a fixed allowlist into validation logic.
+// defaultPracticeConditions is only the fallback Conductor.
+// practiceConditions resolves to when Config.PracticeConditions is left
+// nil (see NewConductor in conductor.go); a deployment tracking a
+// different contract revision overrides the whole list there, with no
+// code change here.
+const (
+	practiceConditionNormalDay     = "normal_day"
+	practiceConditionCalmRange     = "calm_range"
+	practiceConditionTrendingDay   = "trending_day"
+	practiceConditionWhipsaw       = "whipsaw"
+	practiceConditionUnstableDay   = "unstable_day"
+	practiceConditionThinLiquidity = "thin_liquidity"
+)
+
+var defaultPracticeConditions = []string{
+	practiceConditionNormalDay,
+	practiceConditionCalmRange,
+	practiceConditionTrendingDay,
+	practiceConditionWhipsaw,
+	practiceConditionUnstableDay,
+	practiceConditionThinLiquidity,
+}
+
+// buildPracticeConditionSet turns a flat allowlist into the O(1)-lookup
+// shape parsePracticeCondition needs. Exposed at package scope (not a
+// method) so both NewConductor and tests can build one without needing
+// a live *Conductor.
+func buildPracticeConditionSet(allowed []string) map[string]bool {
+	set := make(map[string]bool, len(allowed))
+	for _, condition := range allowed {
+		set[condition] = true
+	}
+	return set
+}
+
+// parsePracticeCondition validates the optional condition field against
+// allowed — the Conductor's configured set (Config.PracticeConditions,
+// or defaultPracticeConditions if that was left nil), never a fixed
+// package-level list.
+//
+//   - "" (field omitted) is legal and means "no condition requested" —
+//     passed through as empty, not defaulted to normal_day. What "no
+//     scenario" means downstream is the agent-orchestrator's call, not
+//     this HTTP layer's.
+//   - a non-empty value outside the configured set is a client bug:
+//     400, same convention as place-order's side/type/tif validation
+//     (broker/order/mapping.go).
+func parsePracticeCondition(raw string, allowed map[string]bool) (string, error) {
+	if raw == "" {
+		return "", nil
+	}
+	if !allowed[raw] {
+		return "", fmt.Errorf("condition %q not recognized", raw)
+	}
+	return raw, nil
 }
 
 // onDemandWarmingUpBody is the gate-pass 200 response. The UI reads
@@ -260,6 +332,17 @@ func (conductor *Conductor) handleStartOnDemand(responseWriter http.ResponseWrit
 		return
 	}
 
+	condition, conditionErr := parsePracticeCondition(requestBody.Condition, conductor.practiceConditions)
+	if conditionErr != nil {
+		conductor.log.Info("conductor: handleStartOnDemand bad condition",
+			"raw", requestBody.Condition,
+			"err", conditionErr,
+			"remote_addr", request.RemoteAddr,
+		)
+		writeError(responseWriter, http.StatusBadRequest, conditionErr.Error(), PathSessionOnDemand)
+		return
+	}
+
 	deadlineCtx, cancelDeadline := context.WithTimeout(request.Context(), conductor.setupTimeout)
 	defer cancelDeadline()
 
@@ -268,6 +351,7 @@ func (conductor *Conductor) handleStartOnDemand(responseWriter http.ResponseWrit
 		UserID(requestBody.User.UserID),
 		MarketTag(marketTag),
 		durationMinutes,
+		condition,
 	)
 	status := onDemandStatusFor(startErr)
 
