@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"simulator/broker/funnel"
-	"simulator/contract"
 	"simulator/economy/lifecycle"
 )
 
@@ -28,14 +27,15 @@ type recordingWindDownAgents struct {
 	callLock      sync.Mutex
 }
 
-func (recorder *recordingWindDownAgents) BringUp(ctx context.Context, market MarketTag, mode Mode, instruments []contract.InstrumentID) error {
+func (recorder *recordingWindDownAgents) BringUp(ctx context.Context, request AgentBringUpRequest) error {
 	return nil
 }
 
-func (recorder *recordingWindDownAgents) WindDown(market MarketTag, mode Mode) {
+func (recorder *recordingWindDownAgents) WindDown(ctx context.Context, exchangeID MarketID, market MarketTag, mode Mode) error {
 	recorder.callLock.Lock()
-	recorder.windDownCalls = append(recorder.windDownCalls, stubWindDownCall{Market: market, Mode: mode})
+	recorder.windDownCalls = append(recorder.windDownCalls, stubWindDownCall{Market: market, ExchangeID: exchangeID, Mode: mode})
 	recorder.callLock.Unlock()
+	return nil
 }
 
 func (recorder *recordingWindDownAgents) windDownCallCount() int {
