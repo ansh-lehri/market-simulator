@@ -579,7 +579,7 @@ func TestLifecycle_RejoinAfterCloseWrapsErrMarketNotLive(t *testing.T) {
 	decodeJoinResponse(t, harness.postJoin(t, "human-42", "IN"))
 	harness.conductor.closeCanonicalMarket(context.Background(), marketID)
 
-	_, err := harness.conductor.JoinCanonical(context.Background(), UserID("human-42"), "IN")
+	_, err := harness.conductor.JoinCanonical(context.Background(), UserID("human-42"), "IN", lifecycle.OwnerHuman)
 	if !errors.Is(err, ErrMarketNotLive) {
 		t.Fatalf("JoinCanonical after close err = %v, want errors.Is ErrMarketNotLive", err)
 	}

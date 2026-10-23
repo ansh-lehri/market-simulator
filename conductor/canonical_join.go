@@ -25,6 +25,12 @@ type JoinResult struct {
 // identifiers verbatim, no broker I/O. First join, rejoin-after-leave,
 // and reconnect-after-reload all enter here.
 //
+// Both the human frontend and L2's per-agent canonical install call this
+// same door; ownerType is the caller's resolved identity class (the HTTP
+// handler defaults an omitted wire value to OwnerHuman, L2 always sends
+// OwnerAgent) and is passed straight through to EnsureAccount so each
+// caller's account lands under the correct owner_type.
+//
 // Three phases, with the one registry mutex taken exactly twice and
 // never across a broker call-out:
 //
@@ -66,10 +72,11 @@ type JoinResult struct {
 //   - wrapped broker error   — any EnsureAccount or StartSession failure,
 //     surfaced with fmt.Errorf("…: %w", err) so joinStatusFor can
 //     classify it with errors.Is.
-func (conductor *Conductor) JoinCanonical(ctx context.Context, userID UserID, tag MarketTag) (JoinResult, error) {
+func (conductor *Conductor) JoinCanonical(ctx context.Context, userID UserID, tag MarketTag, ownerType lifecycle.OwnerType) (JoinResult, error) {
 	conductor.log.Info("conductor: JoinCanonical begin",
 		"user", userID,
 		"tag", tag,
+		"owner_type", ownerType,
 	)
 
 	// ---- RESERVE (lock take #1 — microseconds) ----
@@ -135,7 +142,7 @@ func (conductor *Conductor) JoinCanonical(ctx context.Context, userID UserID, ta
 	)
 
 	// ---- OFF-LOCK: EnsureAccount ----
-	accountID, ensureErr := conductor.broker.EnsureAccount(ctx, lifecycle.OwnerHuman, string(userID))
+	accountID, ensureErr := conductor.broker.EnsureAccount(ctx, ownerType, string(userID))
 	if ensureErr != nil {
 		conductor.rollbackJoin(sessionID, userID)
 		conductor.log.Error("conductor: JoinCanonical ensure-account failed",

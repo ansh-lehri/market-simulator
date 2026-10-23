@@ -148,6 +148,24 @@ func TestHandleAccountOpen_HappyPathIdempotent(t *testing.T) {
 	assertRegistryEmpty(t, conductor)
 }
 
+// --- owner_type resolution -------------------------------------------
+
+func TestHandleAccountOpen_OwnerTypeAgent(t *testing.T) {
+	conductor, broker := newJoinHarness(t)
+
+	recorder := postAccountOpen(t, conductor, http.MethodPost,
+		`{"user":{"user_id":"agent-7f3c","owner_type":"agent"}}`)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200. body=%q", recorder.Code, recorder.Body.String())
+	}
+	if broker.ensureAccountCount() != 1 {
+		t.Fatalf("ensure_account count = %d, want 1", broker.ensureAccountCount())
+	}
+	if inv := broker.ensureAccountInvocations[0]; inv.OwnerType != lifecycle.OwnerAgent {
+		t.Errorf("owner_type = %v, want OwnerAgent", inv.OwnerType)
+	}
+}
+
 // --- request validation --------------------------------------------
 
 func TestHandleAccountOpen_RequestValidation(t *testing.T) {
@@ -163,6 +181,7 @@ func TestHandleAccountOpen_RequestValidation(t *testing.T) {
 		{"malformed JSON -> 400", http.MethodPost, "not json", http.StatusBadRequest},
 		{"missing user_id -> 400", http.MethodPost, `{"user":{"email":"u@x"}}`, http.StatusBadRequest},
 		{"empty user_id -> 400", http.MethodPost, `{"user":{"email":"u@x","user_id":""}}`, http.StatusBadRequest},
+		{"bad owner_type -> 400", http.MethodPost, `{"user":{"email":"u@x","user_id":"u1","owner_type":"robot"}}`, http.StatusBadRequest},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

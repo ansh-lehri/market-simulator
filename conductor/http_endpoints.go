@@ -47,8 +47,21 @@ type joinRequestBody struct {
 }
 
 type joinRequestUser struct {
-	Email  string `json:"email"`
-	UserID string `json:"user_id"`
+	Email     string `json:"email"`
+	UserID    string `json:"user_id"`
+	OwnerType string `json:"owner_type"`
+}
+
+// resolveOwnerType maps the wire owner_type string to the typed enum,
+// defaulting an omitted field to OwnerHuman so the existing human
+// frontend contract (which never sends this field) is unaffected. Any
+// non-empty, unrecognized value is a client error — returns
+// lifecycle.ErrBadOwnerType, never silently falls back to the default.
+func resolveOwnerType(wireValue string) (lifecycle.OwnerType, error) {
+	if wireValue == "" {
+		return lifecycle.OwnerHuman, nil
+	}
+	return lifecycle.ParseOwnerType(wireValue)
 }
 
 // joinResponseBody is the 200 payload. Status is a fixed literal
@@ -163,7 +176,9 @@ func recoverPanic(responseWriter http.ResponseWriter, path string) {
 // --- POST /session/canonical ----------------------------------------
 
 // handleJoinCanonical is the canonical-join HTTP ingress. Decodes the
-// identity packet, validates the two required fields, wraps the
+// identity packet, validates the two required fields, resolves
+// owner_type (omitted → human, so the existing frontend contract is
+// unaffected; L2's agent caller always sends "agent"), wraps the
 // request context with the configured JoinTimeout, calls JoinCanonical,
 // and maps the result through joinStatusFor to the HTTP response. The
 // handler owns the deadline (not the flow) so a slow EnsureAccount or
@@ -195,6 +210,15 @@ func (conductor *Conductor) handleJoinCanonical(responseWriter http.ResponseWrit
 		writeError(responseWriter, http.StatusBadRequest, "user_id and market required", PathSessionCanonical)
 		return
 	}
+	ownerType, ownerTypeErr := resolveOwnerType(requestBody.User.OwnerType)
+	if ownerTypeErr != nil {
+		conductor.log.Info("conductor: handleJoinCanonical bad owner_type",
+			"owner_type", requestBody.User.OwnerType,
+			"remote_addr", request.RemoteAddr,
+		)
+		writeError(responseWriter, http.StatusBadRequest, "owner_type must be one of {agent, human}", PathSessionCanonical)
+		return
+	}
 
 	deadlineCtx, cancelDeadline := context.WithTimeout(request.Context(), conductor.joinTimeout)
 	defer cancelDeadline()
@@ -203,6 +227,7 @@ func (conductor *Conductor) handleJoinCanonical(responseWriter http.ResponseWrit
 		deadlineCtx,
 		UserID(requestBody.User.UserID),
 		MarketTag(requestBody.Market),
+		ownerType,
 	)
 	status := joinStatusFor(joinErr)
 	if joinErr != nil {

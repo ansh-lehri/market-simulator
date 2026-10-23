@@ -160,7 +160,7 @@ func TestJoinCanonical_HappyPath(t *testing.T) {
 	marketID, _ := installLiveCanonicalMarket(t, conductor, "IN")
 	userID := UserID("human-42")
 
-	result, err := conductor.JoinCanonical(context.Background(), userID, "IN")
+	result, err := conductor.JoinCanonical(context.Background(), userID, "IN", lifecycle.OwnerHuman)
 	if err != nil {
 		t.Fatalf("JoinCanonical: %v", err)
 	}
@@ -258,11 +258,11 @@ func TestJoinCanonical_SameUserSameMarket_Reconnects(t *testing.T) {
 	installLiveCanonicalMarket(t, conductor, "IN")
 	userID := UserID("human-42")
 
-	firstResult, firstErr := conductor.JoinCanonical(context.Background(), userID, "IN")
+	firstResult, firstErr := conductor.JoinCanonical(context.Background(), userID, "IN", lifecycle.OwnerHuman)
 	if firstErr != nil {
 		t.Fatalf("first JoinCanonical: %v", firstErr)
 	}
-	secondResult, secondErr := conductor.JoinCanonical(context.Background(), userID, "IN")
+	secondResult, secondErr := conductor.JoinCanonical(context.Background(), userID, "IN", lifecycle.OwnerHuman)
 	if secondErr != nil {
 		t.Fatalf("second JoinCanonical: %v (want nil, got the reconnect path)", secondErr)
 	}
@@ -295,13 +295,13 @@ func TestJoinCanonical_LiveElsewhere_DifferentMarket(t *testing.T) {
 	installLiveCanonicalMarket(t, conductor, "US")
 	userID := UserID("human-42")
 
-	if _, err := conductor.JoinCanonical(context.Background(), userID, "IN"); err != nil {
+	if _, err := conductor.JoinCanonical(context.Background(), userID, "IN", lifecycle.OwnerHuman); err != nil {
 		t.Fatalf("first JoinCanonical on IN: %v", err)
 	}
 	ensureCallsAfterFirstJoin := broker.ensureAccountCount()
 	startCallsAfterFirstJoin := broker.startSessionCount()
 
-	_, secondErr := conductor.JoinCanonical(context.Background(), userID, "US")
+	_, secondErr := conductor.JoinCanonical(context.Background(), userID, "US", lifecycle.OwnerHuman)
 	if !errors.Is(secondErr, ErrLiveElsewhere) {
 		t.Fatalf("second JoinCanonical err = %v, want ErrLiveElsewhere", secondErr)
 	}
@@ -342,7 +342,7 @@ func TestJoinCanonical_LiveElsewhere_NonActiveState(t *testing.T) {
 			conductor.reg.byUser[userID] = injectedSession
 			conductor.reg.mu.Unlock()
 
-			_, joinErr := conductor.JoinCanonical(context.Background(), userID, "IN")
+			_, joinErr := conductor.JoinCanonical(context.Background(), userID, "IN", lifecycle.OwnerHuman)
 			if !errors.Is(joinErr, ErrLiveElsewhere) {
 				t.Fatalf("JoinCanonical err = %v, want ErrLiveElsewhere (transient state %s)",
 					joinErr, transientState)
@@ -361,7 +361,7 @@ func TestJoinCanonical_NoLiveMarket(t *testing.T) {
 	conductor, broker := newJoinHarness(t)
 	// Deliberately no market installed.
 
-	_, err := conductor.JoinCanonical(context.Background(), UserID("human-42"), "IN")
+	_, err := conductor.JoinCanonical(context.Background(), UserID("human-42"), "IN", lifecycle.OwnerHuman)
 	if !errors.Is(err, ErrMarketNotLive) {
 		t.Fatalf("err = %v, want ErrMarketNotLive", err)
 	}
@@ -397,7 +397,7 @@ func TestJoinCanonical_FindLiveCanonicalSelectivity(t *testing.T) {
 			conductor, _ := newJoinHarness(t)
 			installMarket(t, conductor, tc.mode, tc.state, "IN", "candidate")
 
-			_, err := conductor.JoinCanonical(context.Background(), UserID("human-x"), "IN")
+			_, err := conductor.JoinCanonical(context.Background(), UserID("human-x"), "IN", lifecycle.OwnerHuman)
 			if tc.wantAccept {
 				if err != nil {
 					t.Fatalf("expected success, got %v", err)
@@ -430,7 +430,7 @@ func TestJoinCanonical_EnsureAccountFailureRollsBack(t *testing.T) {
 				return "", forcedErr
 			}
 
-			_, err := conductor.JoinCanonical(context.Background(), UserID("human-x"), "IN")
+			_, err := conductor.JoinCanonical(context.Background(), UserID("human-x"), "IN", lifecycle.OwnerHuman)
 			if !errors.Is(err, forcedErr) {
 				t.Fatalf("err = %v, want wrap of %v", err, forcedErr)
 			}
@@ -468,7 +468,7 @@ func TestJoinCanonical_StartSessionFailureRollsBack(t *testing.T) {
 				return forcedErr
 			}
 
-			_, err := conductor.JoinCanonical(context.Background(), UserID("human-x"), "IN")
+			_, err := conductor.JoinCanonical(context.Background(), UserID("human-x"), "IN", lifecycle.OwnerHuman)
 			if !errors.Is(err, forcedErr) {
 				t.Fatalf("err = %v, want wrap of %v", err, forcedErr)
 			}
@@ -508,7 +508,7 @@ func TestJoinCanonical_FinalizeMarketGoneGuard(t *testing.T) {
 		return nil
 	}
 
-	result, err := conductor.JoinCanonical(context.Background(), userID, "IN")
+	result, err := conductor.JoinCanonical(context.Background(), userID, "IN", lifecycle.OwnerHuman)
 	if err != nil {
 		t.Fatalf("JoinCanonical: %v", err)
 	}
@@ -546,7 +546,7 @@ func TestJoinCanonical_ConcurrentJoinsDistinctUsers(t *testing.T) {
 		userID := UserID(fmt.Sprintf("human-%d", userIndex))
 		go func() {
 			startBarrier.Wait()
-			_, joinErr := conductor.JoinCanonical(context.Background(), userID, "IN")
+			_, joinErr := conductor.JoinCanonical(context.Background(), userID, "IN", lifecycle.OwnerHuman)
 			errorsChan <- joinErr
 		}()
 	}
@@ -599,7 +599,7 @@ func TestJoinCanonical_ConcurrentJoinsSameUser(t *testing.T) {
 	for range numAttempts {
 		go func() {
 			startBarrier.Wait()
-			joinResult, joinErr := conductor.JoinCanonical(context.Background(), userID, "IN")
+			joinResult, joinErr := conductor.JoinCanonical(context.Background(), userID, "IN", lifecycle.OwnerHuman)
 			outcomesChan <- attemptOutcome{result: joinResult, err: joinErr}
 		}()
 	}

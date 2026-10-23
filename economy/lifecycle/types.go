@@ -57,6 +57,22 @@ func (ownerType OwnerType) isValid() bool {
 	return ownerType == OwnerAgent || ownerType == OwnerHuman
 }
 
+// ParseOwnerType maps the wire/column string ("agent" / "human") back to
+// the typed enum — the inverse of String(). Any other value, including
+// "", is ErrBadOwnerType; a caller that wants a default for an omitted
+// field resolves it before calling this, not here, so this stays a
+// strict parse with no implicit fallback.
+func ParseOwnerType(wireValue string) (OwnerType, error) {
+	switch wireValue {
+	case "agent":
+		return OwnerAgent, nil
+	case "human":
+		return OwnerHuman, nil
+	default:
+		return OwnerAgent, ErrBadOwnerType
+	}
+}
+
 // LoadedAccount is what session_load / ondemand_session_load return. It
 // bundles the freshly hydrated *account.Account with the durable identity
 // fields (OwnerType, OwnerID) that session_save needs at teardown.

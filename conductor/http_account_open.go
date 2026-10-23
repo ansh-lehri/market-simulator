@@ -16,6 +16,8 @@ import (
 // frontend uses one identity payload across both calls. email is
 // attribution only; user_id is the identity key passed verbatim to
 // the broker as owner_id (admission is anonymous — no validation).
+// owner_type is resolved the same way as the join flow (omitted →
+// human); L2's agent account-open call always sends "agent".
 type accountOpenRequestBody struct {
 	User joinRequestUser `json:"user"`
 }
@@ -45,13 +47,16 @@ type accountOpenResponseBody struct {
 //     are retryable after the backing Postgres recovers.
 //   - 504: context.DeadlineExceeded — the handler's own
 //     accountOpenTimeout fired before EnsureAccount returned.
-//   - 500: lifecycle.ErrBadOwnerType (the handler always sends
-//     OwnerHuman, so this is a conductor bug) or
-//     ErrNegativeStartingCapital / ErrNegativeStartingBank (the
-//     starting-capital/bank live in broker-side server config, not in
-//     the client's request — so a negative value here is a server
-//     misconfig). Fallthrough is also 500 — a leaked unknown error
-//     must never be reported as client-fixable.
+//   - 500: lifecycle.ErrBadOwnerType (unreachable in practice — the
+//     handler resolves and validates owner_type itself before ever
+//     calling OpenAccount, rejecting a bad wire value with 400; this
+//     sentinel surfacing here would mean that guard was bypassed, a
+//     conductor bug) or ErrNegativeStartingCapital /
+//     ErrNegativeStartingBank (the starting-capital/bank live in
+//     broker-side server config, not in the client's request — so a
+//     negative value here is a server misconfig). Fallthrough is also
+//     500 — a leaked unknown error must never be reported as
+//     client-fixable.
 //
 // Kept as its own function instead of merging into joinStatusFor: the
 // same lifecycle sentinel maps to different statuses in the two flows
@@ -84,8 +89,8 @@ func accountOpenStatusFor(err error) int {
 // wire. The conductor's own AccountID named type (used in Session
 // records) is NOT applied here — this call does not touch the
 // registry, so there is no Session field to carry.
-func (conductor *Conductor) OpenAccount(ctx context.Context, userID UserID) (funnel.AccountID, error) {
-	return conductor.broker.EnsureAccount(ctx, lifecycle.OwnerHuman, string(userID))
+func (conductor *Conductor) OpenAccount(ctx context.Context, userID UserID, ownerType lifecycle.OwnerType) (funnel.AccountID, error) {
+	return conductor.broker.EnsureAccount(ctx, ownerType, string(userID))
 }
 
 // handleAccountOpen is the signup/login HTTP ingress. Both flows hit
@@ -122,11 +127,20 @@ func (conductor *Conductor) handleAccountOpen(responseWriter http.ResponseWriter
 		writeError(responseWriter, http.StatusBadRequest, "user_id required", PathAccountOpen)
 		return
 	}
+	ownerType, ownerTypeErr := resolveOwnerType(requestBody.User.OwnerType)
+	if ownerTypeErr != nil {
+		conductor.log.Info("conductor: handleAccountOpen bad owner_type",
+			"owner_type", requestBody.User.OwnerType,
+			"remote_addr", request.RemoteAddr,
+		)
+		writeError(responseWriter, http.StatusBadRequest, "owner_type must be one of {agent, human}", PathAccountOpen)
+		return
+	}
 
 	deadlineCtx, cancelDeadline := context.WithTimeout(request.Context(), conductor.accountOpenTimeout)
 	defer cancelDeadline()
 
-	accountID, ensureErr := conductor.OpenAccount(deadlineCtx, UserID(requestBody.User.UserID))
+	accountID, ensureErr := conductor.OpenAccount(deadlineCtx, UserID(requestBody.User.UserID), ownerType)
 	status := accountOpenStatusFor(ensureErr)
 	if ensureErr != nil {
 		conductor.log.Error("conductor: handleAccountOpen EnsureAccount failed",

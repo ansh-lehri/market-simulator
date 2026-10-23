@@ -74,6 +74,36 @@ func TestHandleJoinCanonical_HappyPath(t *testing.T) {
 	}
 }
 
+// --- owner_type resolution -------------------------------------------
+
+func TestHandleJoinCanonical_OwnerTypeAgent(t *testing.T) {
+	conductor, broker := newHandlerHarness(t)
+	installLiveCanonicalMarket(t, conductor, "IN")
+
+	recorder := postJoin(t, conductor, http.MethodPost,
+		`{"user":{"user_id":"agent-42","owner_type":"agent"},"market":"IN"}`)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200. body=%q", recorder.Code, recorder.Body.String())
+	}
+	if inv := broker.ensureAccountInvocations[0]; inv.OwnerType != lifecycle.OwnerAgent {
+		t.Errorf("owner_type = %v, want OwnerAgent", inv.OwnerType)
+	}
+}
+
+func TestHandleJoinCanonical_OwnerTypeOmitted_DefaultsHuman(t *testing.T) {
+	conductor, broker := newHandlerHarness(t)
+	installLiveCanonicalMarket(t, conductor, "IN")
+
+	recorder := postJoin(t, conductor, http.MethodPost,
+		`{"user":{"user_id":"human-42"},"market":"IN"}`)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200. body=%q", recorder.Code, recorder.Body.String())
+	}
+	if inv := broker.ensureAccountInvocations[0]; inv.OwnerType != lifecycle.OwnerHuman {
+		t.Errorf("owner_type = %v, want OwnerHuman (omitted field must default to human)", inv.OwnerType)
+	}
+}
+
 // --- Request validation (400 / 405) ---------------------------------
 
 func TestHandleJoinCanonical_RequestValidation(t *testing.T) {
@@ -91,6 +121,7 @@ func TestHandleJoinCanonical_RequestValidation(t *testing.T) {
 		{"missing market -> 400", http.MethodPost, `{"user":{"email":"u@x","user_id":"human-42"}}`, http.StatusBadRequest},
 		{"empty user_id -> 400", http.MethodPost, `{"user":{"email":"u@x","user_id":""},"market":"IN"}`, http.StatusBadRequest},
 		{"empty market -> 400", http.MethodPost, `{"user":{"email":"u@x","user_id":"human-42"},"market":""}`, http.StatusBadRequest},
+		{"bad owner_type -> 400", http.MethodPost, `{"user":{"user_id":"human-42","owner_type":"robot"},"market":"IN"}`, http.StatusBadRequest},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

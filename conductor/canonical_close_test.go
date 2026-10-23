@@ -18,6 +18,7 @@ import (
 
 	"simulator/broker/funnel"
 	"simulator/contract"
+	"simulator/economy/lifecycle"
 )
 
 // --- test doubles ----------------------------------------------------
@@ -260,7 +261,7 @@ func TestCloseCanonicalMarket_RacingJoinRejected(t *testing.T) {
 	harness.conductor.reg.markets[marketID].State = TearingDown
 	harness.conductor.reg.mu.Unlock()
 
-	_, err := harness.conductor.JoinCanonical(context.Background(), UserID("human-latecomer"), "IN")
+	_, err := harness.conductor.JoinCanonical(context.Background(), UserID("human-latecomer"), "IN", lifecycle.OwnerHuman)
 	if !errors.Is(err, ErrMarketNotLive) {
 		t.Fatalf("Join during TearingDown err = %v, want ErrMarketNotLive", err)
 	}
@@ -277,7 +278,7 @@ func TestCloseCanonicalMarket_RacingReconnectRejected(t *testing.T) {
 	harness.conductor.reg.markets[marketID].State = TearingDown
 	harness.conductor.reg.mu.Unlock()
 
-	_, err := harness.conductor.JoinCanonical(context.Background(), UserID("human-attached"), "IN")
+	_, err := harness.conductor.JoinCanonical(context.Background(), UserID("human-attached"), "IN", lifecycle.OwnerHuman)
 	if !errors.Is(err, ErrMarketNotLive) {
 		t.Fatalf("Reconnect during TearingDown err = %v, want ErrMarketNotLive (findLiveCanonical skips non-Live)", err)
 	}
