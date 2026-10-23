@@ -110,16 +110,30 @@ type OnDemandResult struct {
 // (bad config, EnsureAccount failure, Qualify transport error) wrap
 // only the underlying cause — the mapper routes those by base
 // sentinel.
+//
+// condition is the optional "practice condition" the frontend's
+// OnDemandRequest.condition field carries (see
+// docs/synthetic-mkt-ui-contract/openapi.yaml's PracticeCondition
+// enum) — one of normal_day/calm_range/trending_day/whipsaw/
+// unstable_day/thin_liquidity, or "" if the caller didn't pick one.
+// The HTTP handler (handleStartOnDemand) has already validated it
+// against that enum before this is called — StartOnDemand trusts it
+// verbatim and threads it straight into AgentBringUpRequest.Scenario,
+// which only the on-demand path ever populates (canonical bring-up has
+// no per-user condition concept). This is otherwise a pure pass-through:
+// no branch in this function inspects condition itself.
 func (conductor *Conductor) StartOnDemand(
 	ctx context.Context,
 	userID UserID,
 	tag MarketTag,
 	durationMinutes int,
+	condition string,
 ) (OnDemandResult, error) {
 	conductor.log.Info("conductor: StartOnDemand begin",
 		"user", userID,
 		"tag", tag,
 		"duration_minutes", durationMinutes,
+		"condition", condition,
 	)
 
 	// Load config BEFORE reserve: a bad tag must never pollute byUser
@@ -223,23 +237,47 @@ func (conductor *Conductor) StartOnDemand(
 	// to the Start moment. A long orchestrator round-trip here does
 	// NOT eat into the user's visible warm-up window — the UI starts
 	// its countdown from the response's warmup_ends_at, which is
-	// anchored to T0 (= post-BringUp).
+	// anchored to T0 (= post-BringUp). warmupDuration/sessionDuration
+	// are pulled forward (pure arithmetic, no I/O) only so the outbound
+	// BringUp request can carry a provisional session-window estimate —
+	// the authoritative T0/schedule is still computed AFTER this call
+	// returns, unchanged from before.
 	instrumentIDs := make([]contract.InstrumentID, 0, len(marketConfig.Instruments))
 	for _, instrumentConfig := range marketConfig.Instruments {
 		instrumentIDs = append(instrumentIDs, instrumentConfig.ID)
 	}
+	warmupDuration := marketConfig.OnDemand.Warmup
+	sessionDuration := time.Duration(durationMinutes) * time.Minute
+
+	// provisionalStart is an ESTIMATE for the outbound agent request
+	// only — it is deliberately NOT the authoritative T0 (constructInstant,
+	// below). The real orchestrator uses SessionStart/SessionEnd for its
+	// own trait/schedule modeling, not as a cross-checked invariant
+	// against the exchange's own clock, so a sub-second-to-low-seconds
+	// skew between this estimate and the real T0 (however long the
+	// agent round-trip takes) is an accepted, documented approximation —
+	// see AgentBringUpRequest's doc comment in ports.go.
+	provisionalStart := conductor.now()
 	bringUpCtx, cancelBringUp := context.WithTimeout(ctx, conductor.bringUpTimeout)
-	bringUpErr := conductor.agents.BringUp(bringUpCtx, tag, OnDemand, instrumentIDs)
+	bringUpErr := conductor.agents.BringUp(bringUpCtx, AgentBringUpRequest{
+		Market:       tag,
+		ExchangeID:   marketID,
+		Mode:         OnDemand,
+		SessionStart: provisionalStart,
+		SessionEnd:   provisionalStart.Add(warmupDuration + sessionDuration),
+		Instruments:  instrumentIDs,
+		Scenario:     condition,
+	})
 	cancelBringUp()
 	if bringUpErr != nil {
 		conductor.failOnDemand(sessionID, userID, marketID, "populate_failed: "+bringUpErr.Error(), nil)
 		return OnDemandResult{}, fmt.Errorf("conductor: StartOnDemand: agent bring-up: %w: %w", ErrOnDemandSetupFailed, bringUpErr)
 	}
 
-	// ---- CONSTRUCT: T0 = now, two-boundary schedule, per-instrument specs ----
+	// ---- CONSTRUCT: T0 = now (authoritative — unaffected by the
+	// BringUp round-trip above), two-boundary schedule, per-instrument
+	// specs ----
 	constructInstant := conductor.now()
-	warmupDuration := marketConfig.OnDemand.Warmup
-	sessionDuration := time.Duration(durationMinutes) * time.Minute
 
 	schedule, scheduleErr := onDemandSchedule(constructInstant, warmupDuration, sessionDuration)
 	if scheduleErr != nil {
