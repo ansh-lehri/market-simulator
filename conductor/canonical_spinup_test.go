@@ -47,22 +47,34 @@ func (sequencer *callSequencer) snapshot() []string {
 // sequencer and returns a configurable canned response (nil for
 // success, any error for forced-failure).
 type recordingAgents struct {
-	sequencer *callSequencer
-	returnErr error
-	callLock  sync.Mutex
-	callCount int
+	sequencer   *callSequencer
+	returnErr   error
+	callLock    sync.Mutex
+	callCount   int
+	lastRequest AgentBringUpRequest
 }
 
-func (recorder *recordingAgents) BringUp(ctx context.Context, market MarketTag, mode Mode, instruments []contract.InstrumentID) error {
-	recorder.sequencer.record("agents.BringUp:" + string(market))
+func (recorder *recordingAgents) BringUp(ctx context.Context, request AgentBringUpRequest) error {
+	recorder.sequencer.record("agents.BringUp:" + string(request.Market))
 	recorder.callLock.Lock()
 	recorder.callCount++
+	recorder.lastRequest = request
 	recorder.callLock.Unlock()
 	return recorder.returnErr
 }
 
-func (recorder *recordingAgents) WindDown(market MarketTag, mode Mode) {
+// lastRequestSnapshot returns the most recent BringUp request this
+// recorder observed, for tests asserting on fields beyond call count
+// (e.g. Scenario).
+func (recorder *recordingAgents) lastRequestSnapshot() AgentBringUpRequest {
+	recorder.callLock.Lock()
+	defer recorder.callLock.Unlock()
+	return recorder.lastRequest
+}
+
+func (recorder *recordingAgents) WindDown(ctx context.Context, exchangeID MarketID, market MarketTag, mode Mode) error {
 	recorder.sequencer.record("agents.WindDown:" + string(market))
+	return nil
 }
 
 // recordingLiquidity is a fire-and-trust LiquidityOperator that only
