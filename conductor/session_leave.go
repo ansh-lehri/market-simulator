@@ -366,7 +366,12 @@ func (conductor *Conductor) tearDownOnDemandInstance(ctx context.Context, market
 		if exchangeHandleForTeardown != nil {
 			exchangeHandleForTeardown.Stop()
 		}
-		conductor.agents.WindDown(marketTagForTeardown, OnDemand)
+		if windDownErr := conductor.agents.WindDown(ctx, marketID, marketTagForTeardown, OnDemand); windDownErr != nil {
+			conductor.log.Error("conductor: tearDownOnDemandInstance agents.WindDown failed on orphan-market path; reaping anyway",
+				"market_id", marketID,
+				"err", windDownErr,
+			)
+		}
 		conductor.reg.mu.Lock()
 		delete(conductor.reg.markets, marketID)
 		conductor.reg.mu.Unlock()
@@ -404,8 +409,15 @@ func (conductor *Conductor) tearDownOnDemandInstance(ctx context.Context, market
 		)
 	}
 
-	// ---- OFF-LOCK: agent wind-down (fire-and-forget) ----
-	conductor.agents.WindDown(marketTagForTeardown, OnDemand)
+	// ---- OFF-LOCK: agent wind-down ----
+	// Forward-progress on error — the teardown contract is "always
+	// reach Stop + reap," same as the broker.EndSession call above.
+	if windDownErr := conductor.agents.WindDown(ctx, marketID, marketTagForTeardown, OnDemand); windDownErr != nil {
+		conductor.log.Error("conductor: tearDownOnDemandInstance agents.WindDown failed; proceeding to exchange stop",
+			"market_id", marketID,
+			"err", windDownErr,
+		)
+	}
 
 	// ---- OFF-LOCK: exchange stop ----
 	if exchangeHandleForTeardown != nil {
