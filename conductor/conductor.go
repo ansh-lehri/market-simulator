@@ -144,6 +144,18 @@ type Config struct {
 	// DefaultCloseTimeout. Expiry surfaces as log + forward-progress
 	// (the close proceeds to WindDown + Stop + reap regardless).
 	CloseTimeout time.Duration
+
+	// PracticeConditions is the allowlist for the optional "condition"
+	// field on POST /session/ondemand (passed through verbatim to
+	// AgentBringUpRequest.Scenario — see ondemand_spinup.go). Nil →
+	// defaultPracticeConditions (http_ondemand.go), which mirrors the
+	// frontend/contract's PracticeCondition enum as of this writing.
+	// That enum is explicitly NOT final — override this field, with no
+	// backend code change, whenever the contract's enum grows, shrinks,
+	// or is renamed. An empty-but-non-nil slice is legal too: it means
+	// "the condition field is never accepted," rejecting every non-empty
+	// value with 400.
+	PracticeConditions []string
 }
 
 // Conductor is this package's top-level object — holds the registry,
@@ -170,6 +182,7 @@ type Conductor struct {
 	badConfigRetryDelay time.Duration
 	closeTimeout        time.Duration
 	wsHandlerFactory    wsHandlerFactoryFn
+	practiceConditions  map[string]bool
 	stopOnce            sync.Once
 
 	// Timer-lifecycle fields reserved for the canonical bring-up phase
@@ -245,6 +258,11 @@ func NewConductor(cfg Config) (*Conductor, error) {
 	if closeTimeout == 0 {
 		closeTimeout = DefaultCloseTimeout
 	}
+	practiceConditionList := cfg.PracticeConditions
+	if practiceConditionList == nil {
+		practiceConditionList = defaultPracticeConditions
+	}
+	practiceConditions := buildPracticeConditionSet(practiceConditionList)
 
 	conductor := &Conductor{
 		reg:                 newRegistry(),
@@ -266,6 +284,7 @@ func NewConductor(cfg Config) (*Conductor, error) {
 		badConfigRetryDelay: badConfigRetryDelay,
 		closeTimeout:        closeTimeout,
 		wsHandlerFactory:    wsHandlerFactory,
+		practiceConditions:  practiceConditions,
 
 		// timerQuit allocated at construction (not deferred to Start)
 		// so flows that spawn goroutines registered on conductor.wg
@@ -285,6 +304,7 @@ func NewConductor(cfg Config) (*Conductor, error) {
 		"setup_timeout", conductor.setupTimeout,
 		"bad_config_retry_delay", conductor.badConfigRetryDelay,
 		"close_timeout", conductor.closeTimeout,
+		"practice_condition_count", len(practiceConditionList),
 	)
 	return conductor, nil
 }
