@@ -8,7 +8,6 @@ import (
 	"sync"
 	"time"
 
-	"simulator/contract"
 	"simulator/exchange/clock"
 	"simulator/exchange/wire"
 )
@@ -78,8 +77,9 @@ func stubDrawToOutcome(draw int) string {
 // WindDown method so in-package tests can confirm the close flow
 // signaled the orchestrator the way the handler contract requires.
 type stubWindDownCall struct {
-	Market MarketTag
-	Mode   Mode
+	Market     MarketTag
+	ExchangeID MarketID
+	Mode       Mode
 }
 
 type stubAgentOrchestrator struct {
@@ -104,7 +104,7 @@ func newStubAgentOrchestrator(log *slog.Logger, seed int64) *stubAgentOrchestrat
 	}
 }
 
-func (stub *stubAgentOrchestrator) BringUp(ctx context.Context, market MarketTag, mode Mode, instruments []contract.InstrumentID) error {
+func (stub *stubAgentOrchestrator) BringUp(ctx context.Context, request AgentBringUpRequest) error {
 	// Honor a context that was already cancelled or past its deadline
 	// before we even drew — a real HTTP adapter would exit the same way.
 	if contextErr := ctx.Err(); contextErr != nil {
@@ -112,8 +112,9 @@ func (stub *stubAgentOrchestrator) BringUp(ctx context.Context, market MarketTag
 		stub.outcomeCounts[stubOutcomeTimeout]++
 		stub.randomLock.Unlock()
 		stub.log.Warn("conductor: stub AgentOrchestrator.BringUp context already cancelled",
-			"market", market,
-			"mode", mode,
+			"market", request.Market,
+			"exchange_id", request.ExchangeID,
+			"mode", request.Mode,
 			"err", contextErr,
 		)
 		return fmt.Errorf("%w: %w", ErrOrchestratorTimeout, contextErr)
@@ -128,27 +129,31 @@ func (stub *stubAgentOrchestrator) BringUp(ctx context.Context, market MarketTag
 	switch outcome {
 	case stubOutcomeSuccess:
 		stub.log.Debug("conductor: stub AgentOrchestrator.BringUp success",
-			"market", market,
-			"mode", mode,
-			"instrument_count", len(instruments),
+			"market", request.Market,
+			"exchange_id", request.ExchangeID,
+			"mode", request.Mode,
+			"instrument_count", len(request.Instruments),
 		)
 		return nil
 	case stubOutcomeUnavailable:
 		stub.log.Warn("conductor: stub AgentOrchestrator.BringUp unavailable",
-			"market", market,
-			"mode", mode,
+			"market", request.Market,
+			"exchange_id", request.ExchangeID,
+			"mode", request.Mode,
 		)
 		return ErrOrchestratorUnavailable
 	case stubOutcomeTimeout:
 		stub.log.Warn("conductor: stub AgentOrchestrator.BringUp timeout",
-			"market", market,
-			"mode", mode,
+			"market", request.Market,
+			"exchange_id", request.ExchangeID,
+			"mode", request.Mode,
 		)
 		return ErrOrchestratorTimeout
 	default:
 		stub.log.Warn("conductor: stub AgentOrchestrator.BringUp rejected",
-			"market", market,
-			"mode", mode,
+			"market", request.Market,
+			"exchange_id", request.ExchangeID,
+			"mode", request.Mode,
 		)
 		return ErrAgentBringUpRejected
 	}
@@ -162,14 +167,16 @@ func (stub *stubAgentOrchestrator) BringUp(ctx context.Context, market MarketTag
 // Concurrency: windDownCalls is guarded by randomLock (reused — the
 // stub already uses it to protect outcomeCounts; both are rare-path
 // fields, keeping one mutex rather than two is clearer).
-func (stub *stubAgentOrchestrator) WindDown(market MarketTag, mode Mode) {
+func (stub *stubAgentOrchestrator) WindDown(ctx context.Context, exchangeID MarketID, market MarketTag, mode Mode) error {
 	stub.randomLock.Lock()
-	stub.windDownCalls = append(stub.windDownCalls, stubWindDownCall{Market: market, Mode: mode})
+	stub.windDownCalls = append(stub.windDownCalls, stubWindDownCall{Market: market, ExchangeID: exchangeID, Mode: mode})
 	stub.randomLock.Unlock()
 	stub.log.Debug("conductor: stub AgentOrchestrator.WindDown",
 		"market", market,
+		"exchange_id", exchangeID,
 		"mode", mode,
 	)
+	return nil
 }
 
 // windDownCallsSnapshot returns a copy of the recorded WindDown calls.
