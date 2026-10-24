@@ -55,11 +55,28 @@ func (service *ReservationService) reserveBuy(
 	// 1. Compute required cash. Reserve READS the buffer (BestAsk +
 	//    SlippageBuffer are engine-supplied on Order); it does not set
 	//    policy on either.
+	// Prices are stored as integer ticks (100 ticks = 1 rupee). Cash
+	// buckets are in rupees (coins). Divide by 100 to convert tick×qty
+	// into rupees so the comparison against availableCash is unit-safe.
 	var requiredCash int64
 	if order.IsMarket {
-		requiredCash = order.BestAsk*order.Qty + order.SlippageBuffer
+		requiredCash = (order.BestAsk*order.Qty + order.SlippageBuffer) / 100
 	} else {
-		requiredCash = order.LimitPrice * order.Qty
+		requiredCash = order.LimitPrice * order.Qty / 100
+	}
+	// A sub-rupee order (price*qty < 100 ticks = ₹1) rounds to zero cash
+	// required after the tick→rupee conversion. Reject it: MoveCash(0) panics
+	// and a zero-cost buy would be a free position — both wrong.
+	if requiredCash == 0 {
+		service.logger.Info("reserve rejected: order value below minimum (sub-rupee)",
+			"order_id", order.OrderID,
+			"account_id", order.AccountID,
+			"session_id", order.SessionID,
+			"instrument", order.InstrumentID,
+			"limit_price", order.LimitPrice,
+			"qty", order.Qty,
+		)
+		return ErrInsufficientFunds
 	}
 
 	// 2. DECISION read (hot-path, in-memory, no store hop). Option B: a
