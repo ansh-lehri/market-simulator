@@ -54,23 +54,20 @@ const (
 // Phase-5 default slippageBufferBps=0 so numbers trace to that default.
 //
 // Setup:
-//   bestAsk cached = 10021, qty = 50, bps = 0 → buffer = 0
-//   MaxSpend  = 10021*50 + 0 = 501050
-//   reserved  = 501050 (invariant: reserved == MaxSpend)
+//   bestAsk = 10021, qty = 50, buffer = 500
+//   reserved  = (10021*50 + 500)/100 = 5015 (tick×qty → rupees via /100)
 //   Walk fills (price improvement — book had better asks than cached):
-//     Trade1: Price=10020, Qty=30 → cost 300600
-//     Trade2: Price=10021, Qty=20 → cost 200420
-//   actualCost = 501020
-//   residue    = 501050 − 501020 = 30 (unused reservation returned by
-//                                      ReleaseExcess — the market-buy
-//                                      true-up on a fully-filled order)
+//     Trade1: Price=10020, Qty=30 → actualCost=10020*30/100=3006
+//     Trade2: Price=10021, Qty=20 → actualCost=10021*20/100=2004
+//   total actualCost = 5010
+//   residue    = 5015 − 5010 = 5 (unused buffer returned by ReleaseExcess)
 //
 // reserve call sequence Stage-5 must produce, per P5 §3.4 case "full fill":
 //   Convert(oid, 30, 10020, _, "acct-G:1:1")   → ConvertEvent (fill)
 //   Convert(oid, 20, 10021, _, "acct-G:1:2")   → ConvertEvent (fill)
 //   chargeOrderCost (shared tail at RemainingQty=0, !BrokerageCharged)
 //                                              → ConvertEvent (brokerage)
-//   ReleaseExcess(oid)                         → ReleaseEvent (residue 30)
+//   ReleaseExcess(oid)                         → ReleaseEvent (residue 5)
 //
 // Expected post-state: Status = Filled, track deleted.
 func TestSettleGolden_Matched_FullFill_MarketBuy_WithResidue(t *testing.T) {
@@ -79,7 +76,7 @@ func TestSettleGolden_Matched_FullFill_MarketBuy_WithResidue(t *testing.T) {
 	harness.seedReservation(reserve.Order{
 		OrderID: goldenOrderID, AccountID: goldenAccountID, SessionID: goldenSessionID,
 		InstrumentID: goldenInstrument, Side: contract.Buy, Qty: 50, IsMarket: true,
-		BestAsk: 10_021, SlippageBuffer: 0,
+		BestAsk: 10_021, SlippageBuffer: 500,
 	})
 	harness.seedTrack(goldenOrderID, OrderStatusWorking, true /* isMarketBuy */)
 	harness.events.reset()
@@ -108,20 +105,20 @@ func TestSettleGolden_Matched_FullFill_MarketBuy_WithResidue(t *testing.T) {
 		t.Fatalf("event count = %d, want 4 (fill1 + fill2 + brokerage + ReleaseExcess)", got)
 	}
 	fill1 := mustConvertEvent(t, harness.events.emitted[0])
-	if fill1.UnitsCredited != 30 || fill1.CashDebited != 10_020*30 {
-		t.Errorf("fill1 = %+v, want UnitsCredited=30 CashDebited=300600", fill1)
+	if fill1.UnitsCredited != 30 || fill1.CashDebited != 10_020*30/100 {
+		t.Errorf("fill1 = %+v, want UnitsCredited=30 CashDebited=3006", fill1)
 	}
 	fill2 := mustConvertEvent(t, harness.events.emitted[1])
-	if fill2.UnitsCredited != 20 || fill2.CashDebited != 10_021*20 {
-		t.Errorf("fill2 = %+v, want UnitsCredited=20 CashDebited=200420", fill2)
+	if fill2.UnitsCredited != 20 || fill2.CashDebited != 10_021*20/100 {
+		t.Errorf("fill2 = %+v, want UnitsCredited=20 CashDebited=2004", fill2)
 	}
 	brokerage := mustConvertEvent(t, harness.events.emitted[2])
 	if brokerage.UnitsCredited != 0 || brokerage.CashDebited != 0 || brokerage.Cost.Total == 0 {
 		t.Errorf("brokerage event = %+v, want Cost.Total>0 and no fill-side fields", brokerage)
 	}
 	residue := mustReleaseEvent(t, harness.events.emitted[3])
-	if residue.Cash != 30 || residue.Units != 0 {
-		t.Errorf("ReleaseExcess residue = %+v, want Cash=30 (501050 reserved − 501020 actual)", residue)
+	if residue.Cash != 5 || residue.Units != 0 {
+		t.Errorf("ReleaseExcess residue = %+v, want Cash=5 (5015 reserved − 5010 actual)", residue)
 	}
 }
 
@@ -170,8 +167,8 @@ func TestSettleGolden_Matched_PartialFill_RemainderRests(t *testing.T) {
 		t.Fatalf("event count = %d, want 1 (one fill, no brokerage, no release)", got)
 	}
 	fill := mustConvertEvent(t, harness.events.emitted[0])
-	if fill.UnitsCredited != 30 || fill.CashDebited != 10_021*30 {
-		t.Errorf("fill = %+v, want UnitsCredited=30 CashDebited=300630", fill)
+	if fill.UnitsCredited != 30 || fill.CashDebited != 10_021*30/100 {
+		t.Errorf("fill = %+v, want UnitsCredited=30 CashDebited=3006", fill)
 	}
 }
 
@@ -501,8 +498,8 @@ func TestSettleGolden_MakerFill_Incremental_PartiallyFilled(t *testing.T) {
 		t.Fatalf("event count = %d, want 1 (one fill ConvertEvent, no brokerage yet)", got)
 	}
 	fill := mustConvertEvent(t, harness.events.emitted[0])
-	if fill.UnitsCredited != 40 || fill.CashDebited != 10_021*40 {
-		t.Errorf("fill = %+v, want UnitsCredited=40 CashDebited=400840", fill)
+	if fill.UnitsCredited != 40 || fill.CashDebited != 10_021*40/100 {
+		t.Errorf("fill = %+v, want UnitsCredited=40 CashDebited=4008", fill)
 	}
 }
 
@@ -636,8 +633,8 @@ func TestSettleGolden_DivertedTime2_AuctionClear_RoutesThroughSettleMatch(t *tes
 		t.Fatalf("event count = %d, want 3 (fill + brokerage + Release(40))", got)
 	}
 	fill := mustConvertEvent(t, harness.events.emitted[0])
-	if fill.UnitsDelivered != 60 || fill.CashCredited != 10_020*60 {
-		t.Errorf("fill = %+v, want UnitsDelivered=60 CashCredited=601200", fill)
+	if fill.UnitsDelivered != 60 || fill.CashCredited != 10_020*60/100 {
+		t.Errorf("fill = %+v, want UnitsDelivered=60 CashCredited=6012", fill)
 	}
 }
 
@@ -672,8 +669,8 @@ func TestSettleGolden_Rejected_ReleasesFullReservation(t *testing.T) {
 		t.Fatalf("event count = %d, want 1 (Release-all)", got)
 	}
 	release := mustReleaseEvent(t, harness.events.emitted[0])
-	if release.Cash != 10_021*10 {
-		t.Errorf("Release cash = %d, want %d (full reservation)", release.Cash, 10_021*10)
+	if release.Cash != 10_021*10/100 {
+		t.Errorf("Release cash = %d, want %d (full reservation)", release.Cash, 10_021*10/100)
 	}
 }
 
@@ -786,7 +783,7 @@ func TestSettleGolden_Property_ReleaseCompletenessAcrossOutcomes(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			harness := newGoldenHarness(t)
 			harness.seedAccount(account.Cash{Available: 10_000_000}, nil)
-			const reservedCash int64 = 10_021 * 10
+			const reservedCash int64 = 10_021 * 10 / 100 // tick×qty → rupees
 			harness.seedReservation(reserve.Order{
 				OrderID: goldenOrderID, AccountID: goldenAccountID, SessionID: goldenSessionID,
 				InstrumentID: goldenInstrument, Side: contract.Buy, Qty: 10, IsMarket: false,
