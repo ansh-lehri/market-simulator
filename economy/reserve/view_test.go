@@ -63,7 +63,7 @@ func TestViewReservation_AfterReserveBuyLimit(t *testing.T) {
 	want := ReservationView{
 		OrderID: testOrderID, Side: contract.Buy, IsMarket: false,
 		LimitPrice:   50,
-		ReservedCash: 5_000, ReservedUnits: 0,
+		ReservedCash: 50, ReservedUnits: 0,
 		RemainingQty: 100, OrigQty: 100,
 	}
 	if view != want {
@@ -90,7 +90,7 @@ func TestViewReservation_AfterReserveBuyMarket(t *testing.T) {
 	}
 	want := ReservationView{
 		OrderID: testOrderID, Side: contract.Buy, IsMarket: true,
-		ReservedCash: 52*100 + 200, ReservedUnits: 0,
+		ReservedCash: (52*100 + 200) / 100, ReservedUnits: 0,
 		RemainingQty: 100, OrigQty: 100,
 	}
 	if view != want {
@@ -138,8 +138,8 @@ func TestViewReservation_AfterPartialConvert(t *testing.T) {
 		Side:         contract.Buy, Qty: 100, LimitPrice: 50,
 	})
 
-	// Convert 30 of 100 at makerPrice=50 → actualCost = 1500 → ReservedCash
-	// shrinks 5000→3500, RemainingQty 100→70, OrigQty unchanged.
+	// Convert 30 of 100 at makerPrice=50 → actualCost = 50*30/100 = 15 → ReservedCash
+	// shrinks 50→35, RemainingQty 100→70, OrigQty unchanged.
 	if err := h.service.Convert(testOrderID, 30, 50, viewTestExitAt, "trade-1"); err != nil {
 		t.Fatalf("Convert err = %v", err)
 	}
@@ -151,7 +151,7 @@ func TestViewReservation_AfterPartialConvert(t *testing.T) {
 	want := ReservationView{
 		OrderID: testOrderID, Side: contract.Buy, IsMarket: false,
 		LimitPrice:   50,
-		ReservedCash: 3_500, ReservedUnits: 0,
+		ReservedCash: 35, ReservedUnits: 0,
 		RemainingQty: 70, OrigQty: 100,
 	}
 	if view != want {
@@ -197,8 +197,8 @@ func TestViewReservation_AfterFullConvertMarketBuyWithResidue(t *testing.T) {
 		Side:         contract.Buy, Qty: 50, IsMarket: true,
 		BestAsk: 10_021, SlippageBuffer: 1_000,
 	})
-	// requiredCash = 10021*50 + 1000 = 502050 reserved.
-	// Convert 50 at makerPrice=10021 → actualCost=501050 → residue=1000.
+	// requiredCash = (10021*50 + 1000)/100 = 502050/100 = 5020 reserved.
+	// Convert 50 at makerPrice=10021 → actualCost=10021*50/100=5010 → residue=10.
 	if err := h.service.Convert(testOrderID, 50, 10_021, viewTestExitAt, "trade-1"); err != nil {
 		t.Fatalf("Convert err = %v", err)
 	}
@@ -209,7 +209,7 @@ func TestViewReservation_AfterFullConvertMarketBuyWithResidue(t *testing.T) {
 	}
 	want := ReservationView{
 		OrderID: testOrderID, Side: contract.Buy, IsMarket: true,
-		ReservedCash: 1_000, ReservedUnits: 0,
+		ReservedCash: 10, ReservedUnits: 0,
 		RemainingQty: 0, OrigQty: 50,
 	}
 	if view != want {
@@ -265,10 +265,10 @@ func TestViewReservation_AfterFullRelease_RecordGone(t *testing.T) {
 //
 // Numbers come from release.go's perQtyCashShare formula:
 //   amount = (ReservedCash*releaseQty + RemainingQty/2) / RemainingQty
-//          = (5000*30 + 100/2) / 100
-//          = (150000 + 50) / 100
-//          = 1500
-// So ReservedCash: 5000 → 3500, RemainingQty: 100 → 70, OrigQty: 100 (fixed).
+//          = (50*30 + 100/2) / 100
+//          = (1500 + 50) / 100
+//          = 15
+// So ReservedCash: 50 → 35, RemainingQty: 100 → 70, OrigQty: 100 (fixed).
 func TestViewReservation_AfterPartialRelease(t *testing.T) {
 	h := newHarness()
 	buildAccountInLedger(h, account.Cash{Available: 1_000_000}, nil)
@@ -289,7 +289,7 @@ func TestViewReservation_AfterPartialRelease(t *testing.T) {
 	want := ReservationView{
 		OrderID: testOrderID, Side: contract.Buy, IsMarket: false,
 		LimitPrice:   50,
-		ReservedCash: 3_500, ReservedUnits: 0,
+		ReservedCash: 35, ReservedUnits: 0,
 		RemainingQty: 70, OrigQty: 100,
 	}
 	if view != want {
@@ -332,7 +332,7 @@ func TestViewReservation_ReturnsValueCopy_NoAliasing(t *testing.T) {
 	want := ReservationView{
 		OrderID: testOrderID, Side: contract.Buy, IsMarket: false,
 		LimitPrice:   50,
-		ReservedCash: 5_000, ReservedUnits: 0,
+		ReservedCash: 50, ReservedUnits: 0,
 		RemainingQty: 100, OrigQty: 100,
 	}
 	if second != want {
