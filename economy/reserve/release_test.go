@@ -21,17 +21,18 @@ import (
 // Fill cost 1 (turnover 400_000): stamp=12, exchange=12, sebi=0, gst=2 → Total=26.
 // Order cost at Release (India, EverFilled=true): brokerage=2000, gst=360 → Total=2360.
 //
+// requiredCash = 10_000*100/100 = 10_000 rupees; actualCost = 10_000*40/100 = 4_000 rupees.
 // After the whole sequence:
-//   Cash.Available  = 1_000_000_000 − 1_000_000 (reserve) + 600_000 (release) − 26 − 2360
-//                   =    999_597_614
+//   Cash.Available  = 1_000_000_000 − 10_000 (reserve) + 6_000 (release) − 26 − 2360
+//                   = 999_993_614
 //   Cash.Reserved   = 0
-//   Cash.Settled    = 400_000 (unaffected by Release)
+//   Cash.Settled    = 4_000 (unaffected by Release)
 //   Positions[ACME] = {Available:40, Reserved:0, OpenLots:[{10000, exitAt, 40}]}
 //   book[testOrderID] = nil (record deleted at full release)
 //
 // Reserved vs debits/credits disjoint by construction:
-//   filled 40 units → 400_000 principal debited to Settled + 26 fill cost to Available
-//   unfilled 60 units → 600_000 returned to Available (never overlapped)
+//   filled 40 units → 4_000 principal debited to Settled + 26 fill cost to Available
+//   unfilled 60 units → 6_000 returned to Available (never overlapped)
 // -----------------------------------------------------------------------------
 
 func TestRelease_PartialFillThenCancel_BrokerageOnce(t *testing.T) {
@@ -63,8 +64,8 @@ func TestRelease_PartialFillThenCancel_BrokerageOnce(t *testing.T) {
 
 	// Final state.
 	acct := h.ledger.accounts[testAccountID]
-	wantAvailable := initialAvailable - 1_000_000 + 600_000 - 26 - 2360
-	wantCash := account.Cash{Available: wantAvailable, Reserved: 0, Settled: 400_000}
+	wantAvailable := initialAvailable - 10_000 + 6_000 - 26 - 2360
+	wantCash := account.Cash{Available: wantAvailable, Reserved: 0, Settled: 4_000}
 	if acct.Cash != wantCash {
 		t.Errorf("Cash = %+v, want %+v", acct.Cash, wantCash)
 	}
@@ -103,7 +104,7 @@ func TestRelease_PartialFillThenCancel_BrokerageOnce(t *testing.T) {
 	wantRelease := ReleaseEvent{
 		OrderID:   testOrderID,
 		AccountID: testAccountID,
-		Cash:      600_000, // exactly the unfilled portion
+		Cash:      6_000, // exactly the unfilled portion (6_000 = 10_000 reserved − 4_000 converted)
 		Units:     0,
 	}
 	if releaseEvent != wantRelease {
@@ -274,15 +275,15 @@ func TestRelease_PartialQtyDecreaseBuy(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("reserve failed: %v", err)
 	}
-	// Reserve moved 10_000 to Reserved.
+	// Reserve moved 100*100/100 = 100 rupees to Reserved.
 
 	if err := h.service.Release(testOrderID, 30); err != nil {
 		t.Fatalf("Release err=%v", err)
 	}
 
 	acct := h.ledger.accounts[testAccountID]
-	// perQtyCashShare(10_000, 30, 100) = (300_000 + 50)/100 = 3000 (exact).
-	wantCash := account.Cash{Available: initialAvailable - 10_000 + 3_000, Reserved: 7_000}
+	// perQtyCashShare(100, 30, 100) = 100*30/100 = 30 (exact).
+	wantCash := account.Cash{Available: initialAvailable - 100 + 30, Reserved: 70}
 	if acct.Cash != wantCash {
 		t.Errorf("Cash = %+v, want %+v", acct.Cash, wantCash)
 	}
@@ -291,8 +292,8 @@ func TestRelease_PartialQtyDecreaseBuy(t *testing.T) {
 	if record == nil {
 		t.Fatal("record deleted on partial release — should be retained (order still resting)")
 	}
-	if record.RemainingQty != 70 || record.ReservedCash != 7_000 {
-		t.Errorf("record = {Remaining:%d, ReservedCash:%d}, want {70, 7000}", record.RemainingQty, record.ReservedCash)
+	if record.RemainingQty != 70 || record.ReservedCash != 70 {
+		t.Errorf("record = {Remaining:%d, ReservedCash:%d}, want {70, 70}", record.RemainingQty, record.ReservedCash)
 	}
 	if record.EverFilled || record.BrokerageCharged {
 		t.Errorf("flags mutated on partial release with no prior fill: {Ever:%v, Brok:%v}", record.EverFilled, record.BrokerageCharged)
@@ -300,8 +301,8 @@ func TestRelease_PartialQtyDecreaseBuy(t *testing.T) {
 
 	// The release event.
 	releaseEvent, ok := h.events.emitted[1].(ReleaseEvent)
-	if !ok || releaseEvent.Cash != 3_000 {
-		t.Errorf("release event = %+v, want ReleaseEvent with Cash:3000", h.events.emitted[1])
+	if !ok || releaseEvent.Cash != 30 {
+		t.Errorf("release event = %+v, want ReleaseEvent with Cash:30", h.events.emitted[1])
 	}
 }
 
@@ -451,18 +452,17 @@ func TestRelease_NegativeReleaseQty_Panics(t *testing.T) {
 // GOLDEN — ReleaseExcess on a market buy with residue.
 //
 // Setup: Available=100_000_000. Reserve market buy 100 with BestAsk=10_000
-// and SlippageBuffer=500 → requiredCash=1_000_500 reserved. Convert(100,
-// 9_500) — fills 5% cheaper than the estimate. After Convert:
+// and SlippageBuffer=500 → requiredCash=(10_000*100+500)/100=10_005 rupees.
+// Convert(100, 9_500) — fills 5% cheaper than the estimate. After Convert:
 //
-//   actualCost = 950_000            → moved Reserved→Settled
-//   residue    = 1_000_500 − 950_000 = 50_500  (buffer + savings still in Reserved)
+//   actualCost = 9_500*100/100 = 9_500 → moved Reserved→Settled
+//   residue    = 10_005 − 9_500 = 505  (buffer + savings still in Reserved)
 //   fill cost  (turnover 950_000): stamp=29, exchange=28, sebi=1, gst=5 → 63
 //   order cost (terminal, EverFilled=true): 2360   (fires INSIDE Convert since
 //                                                   RemainingQty hit 0)
-//   Record retained (ReservedCash=50_500 > 0) for ReleaseExcess to true up.
+//   Record retained (ReservedCash=505 > 0) for ReleaseExcess to true up.
 //
-// ReleaseExcess drains the 50_500 residue back to Available and deletes
-// the record.
+// ReleaseExcess drains the 505 residue back to Available and deletes the record.
 // -----------------------------------------------------------------------------
 
 func TestReleaseExcess_MarketBuyResidue(t *testing.T) {
@@ -482,8 +482,8 @@ func TestReleaseExcess_MarketBuyResidue(t *testing.T) {
 
 	// Sanity: pre-ReleaseExcess state should show the residue and terminal flags.
 	pre := *h.service.book.get(testOrderID)
-	if pre.ReservedCash != 50_500 {
-		t.Fatalf("pre-ReleaseExcess ReservedCash = %d, want 50500", pre.ReservedCash)
+	if pre.ReservedCash != 505 {
+		t.Fatalf("pre-ReleaseExcess ReservedCash = %d, want 505", pre.ReservedCash)
 	}
 	if !pre.BrokerageCharged || pre.RemainingQty != 0 {
 		t.Fatalf("pre-ReleaseExcess record = %+v, want BrokerageCharged:true RemainingQty:0", pre)
@@ -494,9 +494,9 @@ func TestReleaseExcess_MarketBuyResidue(t *testing.T) {
 	}
 
 	acct := h.ledger.accounts[testAccountID]
-	// Available = 100_000_000 − 1_000_500 (reserve) + 50_500 (residue back) − 63 (fill cost) − 2360 (brokerage)
-	wantAvailable := int64(100_000_000 - 1_000_500 + 50_500 - 63 - 2360)
-	wantCash := account.Cash{Available: wantAvailable, Reserved: 0, Settled: 950_000}
+	// Available = 100_000_000 − 10_005 (reserve) + 505 (residue back) − 63 (fill cost) − 2360 (brokerage)
+	wantAvailable := int64(100_000_000 - 10_005 + 505 - 63 - 2360)
+	wantCash := account.Cash{Available: wantAvailable, Reserved: 0, Settled: 9_500}
 	if acct.Cash != wantCash {
 		t.Errorf("Cash = %+v, want %+v", acct.Cash, wantCash)
 	}
@@ -510,8 +510,8 @@ func TestReleaseExcess_MarketBuyResidue(t *testing.T) {
 	if !ok {
 		t.Fatalf("last event = %T, want ReleaseEvent", last)
 	}
-	if releaseEvent.Cash != 50_500 || releaseEvent.Units != 0 {
-		t.Errorf("release event = %+v, want Cash:50500 Units:0", releaseEvent)
+	if releaseEvent.Cash != 505 || releaseEvent.Units != 0 {
+		t.Errorf("release event = %+v, want Cash:505 Units:0", releaseEvent)
 	}
 }
 
