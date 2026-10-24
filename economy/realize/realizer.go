@@ -15,6 +15,11 @@ type accKey struct {
 	Instrument contract.InstrumentID
 }
 
+// maxLiveClosedTrades is the ring-buffer capacity for on-demand sessions.
+// On-demand trades are never sent to Postgres (PersistOnClose=false), so
+// they accumulate here and are served to the observation endpoint directly.
+const maxLiveClosedTrades = 50
+
 // Realizer is realize's live driver — it owns the close-accumulator book,
 // consults the account ledger at accumulator birth (for the PersistOnClose
 // gate), and hands closed rows to the persistence seam.
@@ -22,11 +27,12 @@ type accKey struct {
 // Single-writer assumed (the broker funnel enforces it later); no mutex,
 // no goroutine.
 type Realizer struct {
-	book        map[accKey]*RealizationAccumulator
-	ledger      AccountLedger
-	persist     Persistence
-	costs       cost.CostModule
-	nextTradeID func() TradeID
+	book             map[accKey]*RealizationAccumulator
+	ledger           AccountLedger
+	persist          Persistence
+	costs            cost.CostModule
+	nextTradeID      func() TradeID
+	liveClosedTrades []ClosedTradeRow // ring for on-demand (PersistOnClose=false) sessions
 }
 
 // NewRealizer builds a Realizer wired to the given ledger, persistence
@@ -115,6 +121,13 @@ func (realizer *Realizer) OnSellFill(input RealizationInput) {
 	)
 
 	if !accumulator.PersistOnClose {
+		realizer.appendLiveTrade(closed)
+		slog.Info("realize: closed trade buffered (on-demand)",
+			"account", input.AccountID,
+			"instrument", input.InstrumentID,
+			"trade_id", tradeID,
+			"live_buffer_len", len(realizer.liveClosedTrades),
+		)
 		return
 	}
 
@@ -124,4 +137,31 @@ func (realizer *Realizer) OnSellFill(input RealizationInput) {
 		"instrument", input.InstrumentID,
 		"trade_id", tradeID,
 	)
+}
+
+// appendLiveTrade adds a closed trade to the on-demand ring buffer, evicting
+// the oldest entry when the buffer is full.
+func (realizer *Realizer) appendLiveTrade(row ClosedTradeRow) {
+	realizer.liveClosedTrades = append(realizer.liveClosedTrades, row)
+	if len(realizer.liveClosedTrades) > maxLiveClosedTrades {
+		realizer.liveClosedTrades = realizer.liveClosedTrades[1:]
+	}
+}
+
+// RecentLiveTrades returns up to n of the most recent on-demand closed trades,
+// newest first. Returns nil when nothing has been buffered (canonical sessions
+// never call appendLiveTrade, so the slice stays nil for them).
+func (realizer *Realizer) RecentLiveTrades(n int) []ClosedTradeRow {
+	src := realizer.liveClosedTrades
+	if len(src) == 0 {
+		return nil
+	}
+	if n > len(src) {
+		n = len(src)
+	}
+	result := make([]ClosedTradeRow, n)
+	for i := 0; i < n; i++ {
+		result[i] = src[len(src)-1-i]
+	}
+	return result
 }
