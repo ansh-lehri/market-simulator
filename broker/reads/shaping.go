@@ -101,6 +101,31 @@ func shapeCostBreakdowns(breakdowns []store.TradeCostBreakdown) []map[string]any
 	return rows
 }
 
+// shapeTradeViews shapes the on-demand in-session trade log ([]funnel.TradeView)
+// into the same wire format as shapeTrades, so the client sees an identical
+// recent_trades shape regardless of session mode.
+func shapeTradeViews(views []funnel.TradeView) []map[string]any {
+	trades := make([]map[string]any, 0, len(views))
+	for _, view := range views {
+		trades = append(trades, map[string]any{
+			"trade_id":    view.TradeID,
+			"instrument":  view.InstrumentID,
+			"direction":   view.Direction,
+			"quantity":    view.Quantity,
+			"entry_price": view.EntryPrice,
+			"exit_price":  view.ExitPrice,
+			"entry_at":    view.EntryAt,
+			"exit_at":     view.ExitAt,
+			"gross_pnl":   view.GrossPnl,
+			"total_costs": view.TotalCosts,
+			"net_pnl":     view.NetPnl,
+			"pnl_pct":     view.PnlPct,
+			"exit_reason": view.ExitReason,
+		})
+	}
+	return trades
+}
+
 func shapeTrades(rows []store.TradeRow) []map[string]any {
 	trades := make([]map[string]any, 0, len(rows))
 	for _, row := range rows {

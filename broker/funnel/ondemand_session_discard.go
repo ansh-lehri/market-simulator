@@ -198,6 +198,12 @@ func (ownerShard *shard) handleDiscardSession(cmd DiscardSession) {
 		}
 	}
 
+	// Evict the in-session trade log so a reused on-demand account on this
+	// shard does not see a prior session's trades (OD-4).
+	if ownerShard.realiz != nil {
+		ownerShard.realiz.ClearSession(cmd.AccountID)
+	}
+
 	if ownerShard.discarder == nil {
 		slog.Error("funnel: handleDiscardSession session discarder missing (shard not wired for discard)",
 			"account_id", cmd.AccountID,

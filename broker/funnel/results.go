@@ -1,6 +1,10 @@
 package funnel
 
-import "simulator/contract"
+import (
+	"time"
+
+	"simulator/contract"
+)
 
 // Reply-payload shapes for every command the funnel receives. Each
 // request/response command (place, cancel, transfer, the four reads)
@@ -206,19 +210,46 @@ type OpenOrderView struct {
 	CancelInFlight bool
 }
 
+// TradeView is one closed-trade row as seen from the observation read.
+// For on-demand sessions this is shaped live from realize.ParticipantTradeRow
+// on the shard; for canonical sessions the HTTP handler reads from Postgres
+// instead and never populates SessionTrades on ObservationLive.
+type TradeView struct {
+	TradeID      string
+	InstrumentID string
+	Direction    string
+	Quantity     int64
+	EntryPrice   int64
+	ExitPrice    int64
+	EntryAt      time.Time
+	ExitAt       time.Time
+	GrossPnl     int64
+	TotalCosts   int64
+	NetPnl       int64
+	PnlPct       float64
+	ExitReason   string
+}
+
 // ObservationLive is the live half of the observation read — balance +
 // positions + working orders assembled in one visit to the owning
 // shard so the three sub-payloads cannot interleave with a fill. The
 // durable half (recent closed trades) is merged in by the HTTP handler
-// on a separate goroutine; it is not threaded through here.
+// on a separate goroutine for canonical sessions; for on-demand sessions
+// SessionTrades carries the in-session log and the Ephemeral flag tells
+// the handler to skip Postgres.
 //
-// Present:false → 409 (no live session); the three sub-payloads are
-// zero in that case.
+// Present:false → 409 (no live session); the sub-payloads are zero in
+// that case.
 type ObservationLive struct {
 	Present    bool
 	Balance    BalanceSnapshot
 	Positions  []PositionView
 	OpenOrders []OpenOrderView
+	// Ephemeral is true for on-demand (practice) sessions. When true,
+	// SessionTrades carries the live in-session closed-trade log and the
+	// HTTP handler skips the Postgres recent-trades read entirely.
+	Ephemeral     bool
+	SessionTrades []TradeView
 }
 
 // StopRecord is the payload of a FireStop command. Body owned by Tier 2.

@@ -107,23 +107,38 @@ func (handlerInstance *observationHandler) ServeHTTP(responseWriter http.Respons
 		"positions": shapePositions(live.Positions),
 		"orders":    shapeOrders(live.OpenOrders),
 	}
-	if tradesErr != nil {
-		slog.Warn("broker/reads: observation trades degraded",
-			"account_id", accountID,
-			"err", tradesErr,
-		)
-		response["recent_trades"] = []map[string]any{}
-		response["trades_degraded"] = true
-	} else {
-		response["recent_trades"] = shapeTrades(trades)
+
+	if live.Ephemeral {
+		// On-demand session: serve in-session trade log from the live shard read;
+		// the durable Postgres result is irrelevant (known-empty for on-demand).
+		response["recent_trades"] = shapeTradeViews(live.SessionTrades)
 		response["trades_degraded"] = false
+		slog.Info("broker/reads: 200 observation (on-demand)",
+			"account_id", accountID,
+			"position_rows", len(live.Positions),
+			"order_rows", len(live.OpenOrders),
+			"session_trade_rows", len(live.SessionTrades),
+		)
+	} else {
+		// Canonical session: serve recently closed trades from Postgres.
+		if tradesErr != nil {
+			slog.Warn("broker/reads: observation trades degraded",
+				"account_id", accountID,
+				"err", tradesErr,
+			)
+			response["recent_trades"] = []map[string]any{}
+			response["trades_degraded"] = true
+		} else {
+			response["recent_trades"] = shapeTrades(trades)
+			response["trades_degraded"] = false
+		}
+		slog.Info("broker/reads: 200 observation",
+			"account_id", accountID,
+			"position_rows", len(live.Positions),
+			"order_rows", len(live.OpenOrders),
+			"trade_rows", len(trades),
+			"trades_degraded", tradesErr != nil,
+		)
 	}
-	slog.Info("broker/reads: 200 observation",
-		"account_id", accountID,
-		"position_rows", len(live.Positions),
-		"order_rows", len(live.OpenOrders),
-		"trade_rows", len(trades),
-		"trades_degraded", tradesErr != nil,
-	)
 	writeJSON(responseWriter, http.StatusOK, response, PathObservation)
 }

@@ -22,11 +22,12 @@ type accKey struct {
 // Single-writer assumed (the broker funnel enforces it later); no mutex,
 // no goroutine.
 type Realizer struct {
-	book        map[accKey]*RealizationAccumulator
-	ledger      AccountLedger
-	persist     Persistence
-	costs       cost.CostModule
-	nextTradeID func() TradeID
+	book          map[accKey]*RealizationAccumulator
+	ledger        AccountLedger
+	persist       Persistence
+	costs         cost.CostModule
+	nextTradeID   func() TradeID
+	sessionTrades map[account.AccountID][]ParticipantTradeRow // on-demand only; in-session; never persisted
 }
 
 // NewRealizer builds a Realizer wired to the given ledger, persistence
@@ -37,11 +38,12 @@ type Realizer struct {
 // tests may replace realizer.nextTradeID directly (same-package access).
 func NewRealizer(ledger AccountLedger, persist Persistence, costs cost.CostModule) *Realizer {
 	return &Realizer{
-		book:        map[accKey]*RealizationAccumulator{},
-		ledger:      ledger,
-		persist:     persist,
-		costs:       costs,
-		nextTradeID: defaultTradeIDGenerator,
+		book:          map[accKey]*RealizationAccumulator{},
+		ledger:        ledger,
+		persist:       persist,
+		costs:         costs,
+		nextTradeID:   defaultTradeIDGenerator,
+		sessionTrades: map[account.AccountID][]ParticipantTradeRow{},
 	}
 }
 
@@ -114,14 +116,39 @@ func (realizer *Realizer) OnSellFill(input RealizationInput) {
 		"persist_on_close", accumulator.PersistOnClose,
 	)
 
-	if !accumulator.PersistOnClose {
-		return
+	if accumulator.PersistOnClose {
+		realizer.persist.EnqueueClosedTrade(closed)
+		slog.Info("realize: closed trade enqueued",
+			"account", input.AccountID,
+			"instrument", input.InstrumentID,
+			"trade_id", tradeID,
+		)
+	} else {
+		realizer.sessionTrades[input.AccountID] = append(realizer.sessionTrades[input.AccountID], closed.Summary)
+		slog.Debug("realize: session trade retained (on-demand, not persisted)",
+			"account", input.AccountID,
+			"instrument", input.InstrumentID,
+			"trade_id", tradeID,
+			"total_in_session", len(realizer.sessionTrades[input.AccountID]),
+		)
 	}
+}
 
-	realizer.persist.EnqueueClosedTrade(closed)
-	slog.Info("realize: closed trade enqueued",
-		"account", input.AccountID,
-		"instrument", input.InstrumentID,
-		"trade_id", tradeID,
+// SessionTrades returns the in-session closed-trade log for one account.
+// Populated only for on-demand sessions (PersistOnClose=false); returns
+// nil for canonical accounts or accounts with no closed trades this session.
+// Caller is the owning shard goroutine — single-writer, no lock needed.
+func (realizer *Realizer) SessionTrades(accountID account.AccountID) []ParticipantTradeRow {
+	return realizer.sessionTrades[accountID]
+}
+
+// ClearSession evicts the in-session trade log for one account. Called
+// by handleDiscardSession on on-demand teardown to prevent a reused
+// account on the same shard from seeing a prior session's trades.
+// Caller is the owning shard goroutine — single-writer, no lock needed.
+func (realizer *Realizer) ClearSession(accountID account.AccountID) {
+	delete(realizer.sessionTrades, accountID)
+	slog.Debug("realize: session trades cleared",
+		"account", accountID,
 	)
 }

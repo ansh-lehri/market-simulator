@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"simulator/economy/account"
+	"simulator/economy/realize"
 )
 
 // dispatch is the type-switch that routes an inbound command to the
@@ -310,8 +311,9 @@ func (ownerShard *shard) handleReadOpenOrders(cmd ReadOpenOrders) OpenOrdersSnap
 // positions + working orders in one visit to the owning shard. The
 // three helpers run back-to-back inside this one dispatch so the
 // balance, positions, and orders rows cannot interleave with a
-// settlement fill. The durable recent-closed-trades half is fanned
-// out by the HTTP handler, not here.
+// settlement fill. For on-demand sessions, the in-session trade log
+// is also included (Ephemeral=true, SessionTrades populated); the HTTP
+// handler skips the Postgres recent-trades read when Ephemeral is set.
 func (ownerShard *shard) handleReadObservation(cmd ReadObservation) ObservationLive {
 	slog.Debug("funnel: handleReadObservation begin", "account_id", cmd.AccountID)
 
@@ -320,19 +322,55 @@ func (ownerShard *shard) handleReadObservation(cmd ReadObservation) ObservationL
 		slog.Debug("funnel: handleReadObservation not live", "account_id", cmd.AccountID)
 		return ObservationLive{Present: false}
 	}
+
+	ephemeral := !session.account.Account.PersistOnClose
+	var sessionTrades []TradeView
+	if ephemeral && ownerShard.realiz != nil {
+		sessionTrades = buildTradeViews(ownerShard.realiz.SessionTrades(cmd.AccountID))
+	}
+
 	observation := ObservationLive{
-		Present:    true,
-		Balance:    readBalance(session),
-		Positions:  readPositions(ownerShard, session, ""),
-		OpenOrders: readOpenOrders(ownerShard, cmd.AccountID),
+		Present:       true,
+		Balance:       readBalance(session),
+		Positions:     readPositions(ownerShard, session, ""),
+		OpenOrders:    readOpenOrders(ownerShard, cmd.AccountID),
+		Ephemeral:     ephemeral,
+		SessionTrades: sessionTrades,
 	}
 	slog.Debug("funnel: handleReadObservation ok",
 		"account_id", cmd.AccountID,
 		"session_id", session.binding.SessionID,
 		"position_rows", len(observation.Positions),
 		"order_rows", len(observation.OpenOrders),
+		"ephemeral", ephemeral,
+		"session_trade_rows", len(sessionTrades),
 	)
 	return observation
+}
+
+// buildTradeViews converts the realizer's in-session ParticipantTradeRow
+// slice into the funnel's TradeView shape for inclusion in ObservationLive.
+// Called only for on-demand sessions (Ephemeral=true).
+func buildTradeViews(rows []realize.ParticipantTradeRow) []TradeView {
+	views := make([]TradeView, 0, len(rows))
+	for _, row := range rows {
+		views = append(views, TradeView{
+			TradeID:      row.TradeID,
+			InstrumentID: string(row.InstrumentID),
+			Direction:    row.Direction,
+			Quantity:     row.Quantity,
+			EntryPrice:   row.EntryPrice,
+			ExitPrice:    row.ExitPrice,
+			EntryAt:      row.EntryAt,
+			ExitAt:       row.ExitAt,
+			GrossPnl:     row.GrossPnl,
+			TotalCosts:   row.TotalCosts,
+			NetPnl:       row.NetPnl,
+			PnlPct:       row.PnlPct,
+			ExitReason:   string(row.ExitReason),
+		})
+	}
+	return views
 }
 
 // handleApplyResult — Tier-1 settlement body — lives in settle.go
