@@ -111,7 +111,8 @@ func TestReserveBuyLimit_Sufficient(t *testing.T) {
 		t.Fatalf("ReserveIfAvailable returned err=%v, want nil (admitted)", err)
 	}
 
-	wantCash := account.Cash{Available: 95_000, Reserved: 5_000, Settled: 0, Bank: 500}
+	// requiredCash = 50 ticks * 100 qty / 100 = 50 rupees
+	wantCash := account.Cash{Available: 99_950, Reserved: 50, Settled: 0, Bank: 500}
 	if acct.Cash != wantCash {
 		t.Errorf("Cash after reserve = %+v, want %+v", acct.Cash, wantCash)
 	}
@@ -128,7 +129,7 @@ func TestReserveBuyLimit_Sufficient(t *testing.T) {
 		Side:         contract.Buy,
 		IsMarket:     false,
 		LimitPrice:   50,
-		ReservedCash: 5_000,
+		ReservedCash: 50,
 		RemainingQty: 100,
 		OrigQty:      100,
 	}
@@ -143,7 +144,7 @@ func TestReserveBuyLimit_Sufficient(t *testing.T) {
 	if !ok {
 		t.Fatalf("event type = %T, want ReserveEvent", harness.events.emitted[0])
 	}
-	wantEvent := ReserveEvent{OrderID: testOrderID, AccountID: testAccountID, Cash: 5_000}
+	wantEvent := ReserveEvent{OrderID: testOrderID, AccountID: testAccountID, Cash: 50}
 	if gotEvent != wantEvent {
 		t.Errorf("event = %+v, want %+v", gotEvent, wantEvent)
 	}
@@ -271,7 +272,8 @@ func TestReserveBuyMarket_Sufficient(t *testing.T) {
 		t.Fatalf("ReserveIfAvailable returned err=%v, want nil (admitted)", err)
 	}
 
-	wantRequired := int64(52*100 + 200) // 5400
+	// requiredCash = (52*100 + 200) / 100 = 54 rupees
+	wantRequired := int64((52*100 + 200) / 100) // 54
 	wantCash := account.Cash{Available: 100_000 - wantRequired, Reserved: wantRequired}
 	if acct.Cash != wantCash {
 		t.Errorf("Cash = %+v, want %+v", acct.Cash, wantCash)
@@ -371,20 +373,23 @@ func TestReserveBuy_InsufficientFunds_NoMutation(t *testing.T) {
 		slippageBuffer int64
 	}{
 		{
+			// requiredCash = 100*100/100 = 100 > 40
 			name:          "buy-limit, positive Available below required",
-			cashAvailable: 100,
+			cashAvailable: 40,
 			isMarket:      false,
 			qty:           100,
-			limitPrice:    50,
+			limitPrice:    100,
 		},
 		{
+			// requiredCash = 200*1/100 = 2 > 0
 			name:          "buy-limit, zero Available",
 			cashAvailable: 0,
 			isMarket:      false,
 			qty:           1,
-			limitPrice:    50,
+			limitPrice:    200,
 		},
 		{
+			// requiredCash = 100*1/100 = 1 > -500
 			name:          "buy-limit, Option B negative Available (already in debt)",
 			cashAvailable: -500,
 			isMarket:      false,
@@ -392,19 +397,21 @@ func TestReserveBuy_InsufficientFunds_NoMutation(t *testing.T) {
 			limitPrice:    100,
 		},
 		{
+			// requiredCash = (200*100+0)/100 = 200 > 100
 			name:           "buy-market, positive Available below required",
 			cashAvailable:  100,
 			isMarket:       true,
 			qty:            100,
-			bestAsk:        50,
-			slippageBuffer: 200,
+			bestAsk:        200,
+			slippageBuffer: 0,
 		},
 		{
+			// requiredCash = (200*1+0)/100 = 2 > -100
 			name:           "buy-market, Option B negative Available",
 			cashAvailable:  -100,
 			isMarket:       true,
 			qty:            1,
-			bestAsk:        50,
+			bestAsk:        200,
 			slippageBuffer: 0,
 		},
 	}
