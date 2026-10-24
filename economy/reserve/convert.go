@@ -88,6 +88,19 @@ func (service *ReservationService) Convert(
 		service.chargeOrderCost(record, resolvedAccount)
 		record.BrokerageCharged = true
 	}
+	// For a terminal limit buy, sweep any residual reserved cash (integer-
+	// truncation rounding across multiple fills, or below-limit price
+	// savings) back to Available so the three-way delete fires cleanly.
+	// Market buys deliberately retain their buffer here — ReleaseExcess is
+	// their true-up path.
+	if !record.IsMarket && record.RemainingQty == 0 && record.ReservedCash > 0 {
+		if err := resolvedAccount.Cash.MoveCash(account.Reserved, account.Available, record.ReservedCash); err != nil {
+			panic(fmt.Sprintf(
+				"convert: sweep limit buy residue MoveCash(Reserved→Available, %d) failed on order %q: %v",
+				record.ReservedCash, orderID, err))
+		}
+		record.ReservedCash = 0
+	}
 	if record.RemainingQty == 0 && record.ReservedCash == 0 && record.ReservedUnits == 0 {
 		service.book.remove(orderID)
 	}
@@ -104,7 +117,8 @@ func (service *ReservationService) convertBuy(
 	makerPrice int64,
 	exitAt time.Time,
 ) {
-	actualCost := makerPrice * fillQty
+	// Tick×qty → rupees: same unit conversion as at reserve time.
+	actualCost := makerPrice * fillQty / 100
 
 	// 1. Principal debit: Reserved → Settled, at MAKER price (universal core
 	//    invariant: every fill executes at the resting/maker order's price).
@@ -195,7 +209,8 @@ func (service *ReservationService) convertSell(
 	exitAt time.Time,
 	tradeID realize.TradeID,
 ) {
-	proceeds := makerPrice * fillQty
+	// Tick×qty → rupees: prices are tick integers; cash is in rupees.
+	proceeds := makerPrice * fillQty / 100
 
 	// 1. Deliver units OUT of Reserved (gone). RemovePosition returns the
 	//    matched lots for 5.4 to price against MakerPrice. Position must
