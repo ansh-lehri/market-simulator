@@ -175,12 +175,12 @@ func TestHandleReadObservation_LiveSession_AllThreeLegsFilled(t *testing.T) {
 	if !got.Present {
 		t.Fatalf("expected Present:true, got %+v", got)
 	}
-	// Balance leg — note: seedReservation above moved 500 (qty=5 × price=100)
+	// Balance leg — note: seedReservation above moved 5 (qty=5 × price=100/100)
 	// from Available into Reserved, so the live snapshot reflects post-reserve.
 	if !got.Balance.Present {
 		t.Fatalf("Balance leg missing Present:true")
 	}
-	if got.Balance.Available != 10_000_000-500 || got.Balance.Reserved != 1_000+500 || got.Balance.Bank != 50_000 {
+	if got.Balance.Available != 10_000_000-5 || got.Balance.Reserved != 1_000+5 || got.Balance.Bank != 50_000 {
 		t.Fatalf("Balance leg values dropped: %+v", got.Balance)
 	}
 	// Positions leg (readPositions is called with "", so all held instruments).
