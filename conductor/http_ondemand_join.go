@@ -3,6 +3,7 @@ package conductor
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"simulator/economy/lifecycle"
@@ -44,10 +45,25 @@ func resolveOnDemandJoinOwnerType(wireValue string) (lifecycle.OwnerType, error)
 	return lifecycle.ParseOwnerType(wireValue)
 }
 
+// onDemandJoinStatusFor maps a JoinOnDemand return error to an HTTP
+// status. Delegates to joinStatusFor for everything except
+// ErrMarketNotLive, which gets 503 instead of 409. The distinction
+// matters: on-demand agents always join a market that was just created
+// moments ago — "not live" here means StartSession's Redis write is
+// still in flight (a transient initialization gap of ~1s), not a
+// permanent conflict. 503 signals "retry shortly"; 409 would signal
+// "give up" and the agent client treats 4xx as non-retryable.
+func onDemandJoinStatusFor(err error) int {
+	if errors.Is(err, ErrMarketNotLive) {
+		return http.StatusServiceUnavailable
+	}
+	return joinStatusFor(err)
+}
+
 // handleJoinOnDemand is the on-demand per-agent join HTTP ingress.
 // Mirrors handleJoinCanonical's shape (decode, validate required
 // fields, resolve owner_type, timeout-wrap, call the flow, map through
-// joinStatusFor).
+// onDemandJoinStatusFor).
 func (conductor *Conductor) handleJoinOnDemand(responseWriter http.ResponseWriter, request *http.Request) {
 	defer recoverPanic(responseWriter, PathSessionOnDemandJoin)
 
@@ -93,7 +109,7 @@ func (conductor *Conductor) handleJoinOnDemand(responseWriter http.ResponseWrite
 		MarketID(requestBody.ExchangeID),
 		ownerType,
 	)
-	status := joinStatusFor(joinErr)
+	status := onDemandJoinStatusFor(joinErr)
 	if joinErr != nil {
 		conductor.log.Error("conductor: handleJoinOnDemand failed",
 			"user_id", requestBody.User.UserID,
