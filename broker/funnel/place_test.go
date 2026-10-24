@@ -223,8 +223,8 @@ func TestHandlePlaceOrder_MarketBuyColdCache_RejectsNoMarketPrice(t *testing.T) 
 // happened at STEP 3 before Gate 4; the gap is harmless (P5-D4).
 func TestHandlePlaceOrder_ReserveInsufficientFunds_NoTrackNoPunch(t *testing.T) {
 	harness := newGoldenHarness(t)
-	// Available=100 is insufficient for 10 units at 100 (requires 1_000).
-	harness.seedAccount(account.Cash{Available: 100}, nil)
+	// Available=5 is insufficient for 10 units at 100 (requires 100*10/100=10 rupees).
+	harness.seedAccount(account.Cash{Available: 5}, nil)
 
 	result := harness.shard.handlePlaceOrder(PlaceOrder{
 		AccountID: harness.accountID,
@@ -330,13 +330,13 @@ func TestHandlePlaceOrder_HappyLimitBuy_PunchesWithGTC(t *testing.T) {
 	if track.Status != OrderStatusWorking || track.IsMarketBuy {
 		t.Errorf("track = %+v, want Status=Working IsMarketBuy=false", *track)
 	}
-	// ReservedCash = 500 * 100 = 50_000 (computed internally by the reserve service from LimitPrice).
+	// ReservedCash = 500 * 100 / 100 = 500 (tick×qty → rupees via /100).
 	view, viewOK := harness.shard.resv.ViewReservation(wantOrderID)
 	if !viewOK {
 		t.Fatalf("ViewReservation missing")
 	}
-	if view.ReservedCash != 500*100 {
-		t.Errorf("ReservedCash = %d, want 50000 (limit * qty)", view.ReservedCash)
+	if view.ReservedCash != 500*100/100 {
+		t.Errorf("ReservedCash = %d, want 500 (limit * qty / 100)", view.ReservedCash)
 	}
 	if view.IsMarket {
 		t.Errorf("ViewReservation.IsMarket = true, want false on limit")
