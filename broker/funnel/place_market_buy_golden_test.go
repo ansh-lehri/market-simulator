@@ -28,6 +28,10 @@ import (
 //       = bestAsk*qty + buffer.
 //   (c) Those two numbers ARE EQUAL — the invariant.
 //
+// Unit note: MaxSpend is in exchange ticks×qty units (bestAsk*qty+buffer);
+// ReservedCash is in broker rupee units ((bestAsk*qty+buffer)/100). The
+// invariant is MaxSpend/100 == ReservedCash, not literal equality.
+//
 // Also pins:
 //   - OrderID shape "<AccountID>:<seq>" (first mint = "acct-G:1")
 //   - OrderTrack created with IsMarketBuy=true and Status=Working
@@ -51,11 +55,14 @@ func TestPlaceGolden_MarketBuy_ReservedEqualsMaxSpend_WithPhase5Defaults(t *test
 		bestAsk           contract.Ticks = 10_021
 		orderQty          contract.Qty   = 50
 	)
-	// slippageBufferBps=0 is the current default (dial stays zero until the market-data cache lands). Buffer
-	// evaluates to 0; both MaxSpend and reserved land at bestAsk*qty = 501050.
+	// slippageBufferBps=0 → buffer=0.
+	// MaxSpend (exchange unit, ticks×qty): bestAsk*qty + buffer = 501050.
+	// ReservedCash (broker unit, rupees): MaxSpend / 100 = 5010.
+	// Invariant: MaxSpend / 100 == ReservedCash (same budget, two units).
 	const (
 		expectedBuffer       int64 = 0
-		expectedRequiredCash int64 = int64(bestAsk) * int64(orderQty) // 501050
+		expectedMaxSpend     int64 = int64(bestAsk) * int64(orderQty) // 501050 ticks×qty
+		expectedRequiredCash int64 = expectedMaxSpend / 100           // 5010 rupees
 	)
 
 	harness.seedAccount(account.Cash{Available: startingAvailable}, nil)
@@ -182,7 +189,7 @@ func TestPlaceGolden_MarketBuy_ReservedEqualsMaxSpend_WithPhase5Defaults(t *test
 			TIF:         contract.IOC,
 			Qty:         orderQty,
 			LimitPrice:  0,
-			MaxSpend:    expectedRequiredCash, // THE INVARIANT: == reserved
+			MaxSpend:    expectedMaxSpend, // exchange ticks×qty; /100 == reservedCash
 			STP:         contract.CancelIncoming,
 		}
 		if *outbound.Submit != wantFunded {
