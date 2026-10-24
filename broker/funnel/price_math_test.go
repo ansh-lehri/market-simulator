@@ -29,9 +29,9 @@ func TestNewBroker_ZeroMoneyConfigLeavesShardDialZero(t *testing.T) {
 	}
 }
 
-// maxSpend is bestAsk*qty + buffer — identical to reserve.Order's internal
-// requiredCash formula (economy/reserve/reserve.go line 60), which is the
-// "reserved == MaxSpend by construction" invariant Phase-5 §1.5 pins.
+// maxSpend is bestAsk*qty + buffer in ticks×qty (exchange units). The broker's
+// requiredCash is maxSpend/100 (rupees). The invariant is maxSpend/100 == reservedCash
+// — same budget expressed in two unit systems.
 func TestMaxSpend_Formula(t *testing.T) {
 	cases := []struct {
 		name    string
