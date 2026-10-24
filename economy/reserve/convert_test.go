@@ -53,8 +53,8 @@ func primeAccount(h *harness, cash account.Cash, positions map[contract.Instrume
 // -----------------------------------------------------------------------------
 // GOLDEN — buy partial. Hand-computed India cost lines pinned exactly.
 //
-// Setup: reserve buy 100 units @ limit 10_000 paise (Rs.100/unit) →
-// requiredCash = 1_000_000 paise. Then Convert(fillQty=40, makerPrice=10_000).
+// Setup: reserve buy 100 units @ limit 10_000 ticks (Rs.100/unit) →
+// requiredCash = 10_000*100/100 = 10_000 rupees. Then Convert(fillQty=40, makerPrice=10_000).
 //
 // Expected fill cost (India, buy side, turnover = 400_000 paise):
 //   stamp    = round_half_up(400_000 × 0.003%)   = (1_200_000 + 50_000)/100_000 = 12
@@ -93,9 +93,9 @@ func TestConvertBuy_Partial_CostOrdering(t *testing.T) {
 
 	acct := h.ledger.accounts[testAccountID]
 	wantCash := account.Cash{
-		Available: initialAvailable - 1_000_000 - 26, // reserve moved 1_000_000 out, then fill cost 26 debited
-		Reserved:  600_000,
-		Settled:   400_000,
+		Available: initialAvailable - 10_000 - 26, // reserve moved 10_000 out, then fill cost 26 debited
+		Reserved:  6_000,
+		Settled:   4_000,
 	}
 	if acct.Cash != wantCash {
 		t.Errorf("Cash = %+v, want %+v", acct.Cash, wantCash)
@@ -126,7 +126,7 @@ func TestConvertBuy_Partial_CostOrdering(t *testing.T) {
 		Side:             contract.Buy,
 		IsMarket:         false,
 		LimitPrice:       10_000,
-		ReservedCash:     600_000,
+		ReservedCash:     6_000,
 		RemainingQty:     60,
 		OrigQty:          100,
 		EverFilled:       true,
@@ -148,7 +148,7 @@ func TestConvertBuy_Partial_CostOrdering(t *testing.T) {
 	wantConvert := ConvertEvent{
 		OrderID:       testOrderID,
 		AccountID:     testAccountID,
-		CashDebited:   400_000,
+		CashDebited:   4_000,
 		UnitsCredited: 40,
 		Cost: cost.CostBreakdown{
 			Lines: map[string]int64{"stamp": 12, "exchange": 12, "sebi": 0, "gst": 2},
@@ -209,8 +209,8 @@ func TestConvertBuy_FullFill_MultipleConverts_BrokerageOnce(t *testing.T) {
 	if afterFirst.BrokerageCharged {
 		t.Errorf("BrokerageCharged = true after first partial fill — must not fire until terminal")
 	}
-	if afterFirst.RemainingQty != 40 || afterFirst.ReservedCash != 400_000 {
-		t.Errorf("record after fill 1 = {Remaining:%d, Reserved:%d}, want {40, 400000}",
+	if afterFirst.RemainingQty != 40 || afterFirst.ReservedCash != 4_000 {
+		t.Errorf("record after fill 1 = {Remaining:%d, Reserved:%d}, want {40, 4000}",
 			afterFirst.RemainingQty, afterFirst.ReservedCash)
 	}
 
@@ -223,9 +223,9 @@ func TestConvertBuy_FullFill_MultipleConverts_BrokerageOnce(t *testing.T) {
 	}
 
 	acct := h.ledger.accounts[testAccountID]
-	// Cash: initial - 1_000_000 (reserve) - 40 (fill cost 1) - 26 (fill cost 2) - 2360 (brokerage)
-	wantAvailable := initialAvailable - 1_000_000 - 40 - 26 - 2360
-	wantCash := account.Cash{Available: wantAvailable, Reserved: 0, Settled: 1_000_000}
+	// Cash: initial - 10_000 (reserve) - 40 (fill cost 1) - 26 (fill cost 2) - 2360 (brokerage)
+	wantAvailable := initialAvailable - 10_000 - 40 - 26 - 2360
+	wantCash := account.Cash{Available: wantAvailable, Reserved: 0, Settled: 10_000}
 	if acct.Cash != wantCash {
 		t.Errorf("Cash = %+v, want %+v", acct.Cash, wantCash)
 	}
@@ -297,8 +297,8 @@ func TestConvertSell_Partial_HandsOffToRealize(t *testing.T) {
 	}
 
 	acct := h.ledger.accounts[testAccountID]
-	// Cash: 100_000_000 + 600_000 (proceeds) - 172 (fill cost).
-	wantCash := account.Cash{Available: 100_000_000 + 600_000 - 172}
+	// Cash: 100_000_000 + 6_000 (proceeds = 12_000*50/100) - 172 (fill cost).
+	wantCash := account.Cash{Available: 100_000_000 + 6_000 - 172}
 	if acct.Cash != wantCash {
 		t.Errorf("Cash = %+v, want %+v", acct.Cash, wantCash)
 	}
@@ -382,7 +382,8 @@ func TestConvertSell_Terminal_PositionFlat(t *testing.T) {
 	}
 
 	acct := h.ledger.accounts[testAccountID]
-	wantAvailable := int64(100_000_000 + 1_200_000 - 344 - 2360)
+	// proceeds = 12_000*100/100 = 12_000 rupees
+	wantAvailable := int64(100_000_000 + 12_000 - 344 - 2360)
 	wantCash := account.Cash{Available: wantAvailable}
 	if acct.Cash != wantCash {
 		t.Errorf("Cash = %+v, want %+v", acct.Cash, wantCash)
@@ -466,9 +467,9 @@ func TestConvertBuy_MarketResidue_RecordRetained(t *testing.T) {
 	if record == nil {
 		t.Fatal("record deleted despite ReservedCash > 0 — ReleaseExcess would have nothing to true up")
 	}
-	// requiredCash was 10_000*100 + 500 = 1_000_500; actualCost 9_500*100 = 950_000; residue = 50_500.
-	if record.ReservedCash != 50_500 {
-		t.Errorf("residue ReservedCash = %d, want 50_500", record.ReservedCash)
+	// requiredCash = (10_000*100+500)/100 = 10_005; actualCost = 9_500*100/100 = 9_500; residue = 505.
+	if record.ReservedCash != 505 {
+		t.Errorf("residue ReservedCash = %d, want 505", record.ReservedCash)
 	}
 	if record.RemainingQty != 0 {
 		t.Errorf("RemainingQty = %d, want 0", record.RemainingQty)
