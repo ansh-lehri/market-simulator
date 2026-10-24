@@ -151,7 +151,9 @@ func TestProperty_CoreInvariant_LimitOrderLifecycle(t *testing.T) {
 	rapid.Check(t, func(rt *rapid.T) {
 		isSell := rapid.Bool().Draw(rt, "isSell")
 		origQty := rapid.Int64Range(1, 20).Draw(rt, "origQty")
-		limitPrice := rapid.Int64Range(1, 1000).Draw(rt, "limitPrice")
+		// Minimum 100 ticks (₹1) so that limitPrice*origQty/100 >= 1 and
+		// Reserve never rejects a valid property draw as sub-rupee.
+		limitPrice := rapid.Int64Range(100, 10000).Draw(rt, "limitPrice")
 
 		harness := newIndiaHarness()
 		initialAvailable := int64(100_000_000_000) // large enough that fill costs + brokerage never bite
