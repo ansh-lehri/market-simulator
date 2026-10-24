@@ -83,12 +83,12 @@ type onDemandRequestBody struct {
 // different contract revision overrides the whole list there, with no
 // code change here.
 const (
-	practiceConditionNormalDay     = "normal_day"
-	practiceConditionCalmRange     = "calm_range"
+	practiceConditionNormalDay     = "normal"
+	practiceConditionCalmRange     = "calm"
 	practiceConditionTrendingDay   = "trending_day"
 	practiceConditionWhipsaw       = "whipsaw"
 	practiceConditionUnstableDay   = "unstable_day"
-	practiceConditionThinLiquidity = "thin_liquidity"
+	practiceConditionThinLiquidity = "thin"
 )
 
 var defaultPracticeConditions = []string{

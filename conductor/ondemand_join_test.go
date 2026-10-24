@@ -8,6 +8,31 @@ import (
 	"simulator/economy/lifecycle"
 )
 
+// TestJoinOnDemand_OwnerTypePassedThroughToEnsureAccount is the direct
+// regression test for the real bug: ownerType must reach EnsureAccount
+// unchanged, not get hardcoded to OwnerAgent. EnsureAccount is keyed by
+// (owner_type, owner_id), so a caller that opened its account as
+// OwnerAgentOperator but joins under a hardcoded OwnerAgent would get
+// its session installed on a DIFFERENT account row than the one it
+// actually holds — every subsequent order/seed-inventory call against
+// its real account would then 409 "no session", even though *a*
+// session was installed (just not on that account).
+func TestJoinOnDemand_OwnerTypePassedThroughToEnsureAccount(t *testing.T) {
+	conductor, broker := newJoinHarness(t)
+	marketID, _ := installMarket(t, conductor, OnDemand, Live, "IN", "od-1")
+	operatorUserID := UserID("seeder-sell-0")
+
+	if _, err := conductor.JoinOnDemand(context.Background(), operatorUserID, marketID, lifecycle.OwnerAgentOperator); err != nil {
+		t.Fatalf("JoinOnDemand: %v", err)
+	}
+	if broker.ensureAccountCount() != 1 {
+		t.Fatalf("EnsureAccount calls = %d, want 1", broker.ensureAccountCount())
+	}
+	if inv := broker.ensureAccountInvocations[0]; inv.OwnerType != lifecycle.OwnerAgentOperator {
+		t.Errorf("EnsureAccount owner_type = %v, want OwnerAgentOperator", inv.OwnerType)
+	}
+}
+
 // --- JoinOnDemand: happy path ------------------------------------------
 
 func TestJoinOnDemand_HappyPath(t *testing.T) {
@@ -15,7 +40,7 @@ func TestJoinOnDemand_HappyPath(t *testing.T) {
 	marketID, _ := installMarket(t, conductor, OnDemand, Live, "IN", "od-1")
 	agentUserID := UserID("agent-42")
 
-	result, err := conductor.JoinOnDemand(context.Background(), agentUserID, marketID)
+	result, err := conductor.JoinOnDemand(context.Background(), agentUserID, marketID, lifecycle.OwnerAgent)
 	if err != nil {
 		t.Fatalf("JoinOnDemand: %v", err)
 	}
@@ -73,11 +98,11 @@ func TestJoinOnDemand_SameAgentSameMarket_Reconnects(t *testing.T) {
 	marketID, _ := installMarket(t, conductor, OnDemand, Live, "IN", "od-1")
 	agentUserID := UserID("agent-42")
 
-	firstResult, firstErr := conductor.JoinOnDemand(context.Background(), agentUserID, marketID)
+	firstResult, firstErr := conductor.JoinOnDemand(context.Background(), agentUserID, marketID, lifecycle.OwnerAgent)
 	if firstErr != nil {
 		t.Fatalf("first JoinOnDemand: %v", firstErr)
 	}
-	secondResult, secondErr := conductor.JoinOnDemand(context.Background(), agentUserID, marketID)
+	secondResult, secondErr := conductor.JoinOnDemand(context.Background(), agentUserID, marketID, lifecycle.OwnerAgent)
 	if secondErr != nil {
 		t.Fatalf("second JoinOnDemand: %v (want reconnect, not an error)", secondErr)
 	}
@@ -98,10 +123,10 @@ func TestJoinOnDemand_LiveElsewhere_DifferentMarket(t *testing.T) {
 	secondMarketID, _ := installMarket(t, conductor, OnDemand, Live, "IN", "od-2")
 	agentUserID := UserID("agent-42")
 
-	if _, err := conductor.JoinOnDemand(context.Background(), agentUserID, firstMarketID); err != nil {
+	if _, err := conductor.JoinOnDemand(context.Background(), agentUserID, firstMarketID, lifecycle.OwnerAgent); err != nil {
 		t.Fatalf("first JoinOnDemand: %v", err)
 	}
-	if _, err := conductor.JoinOnDemand(context.Background(), agentUserID, secondMarketID); !errors.Is(err, ErrLiveElsewhere) {
+	if _, err := conductor.JoinOnDemand(context.Background(), agentUserID, secondMarketID, lifecycle.OwnerAgent); !errors.Is(err, ErrLiveElsewhere) {
 		t.Fatalf("second JoinOnDemand err = %v, want ErrLiveElsewhere", err)
 	}
 }
@@ -118,7 +143,7 @@ func TestJoinOnDemand_LiveElsewhere_ExistingCanonicalSession(t *testing.T) {
 	if _, err := conductor.JoinCanonical(context.Background(), agentUserID, "IN", lifecycle.OwnerAgent); err != nil {
 		t.Fatalf("JoinCanonical: %v", err)
 	}
-	if _, err := conductor.JoinOnDemand(context.Background(), agentUserID, onDemandMarketID); !errors.Is(err, ErrLiveElsewhere) {
+	if _, err := conductor.JoinOnDemand(context.Background(), agentUserID, onDemandMarketID, lifecycle.OwnerAgent); !errors.Is(err, ErrLiveElsewhere) {
 		t.Fatalf("JoinOnDemand err = %v, want ErrLiveElsewhere", err)
 	}
 }
@@ -127,7 +152,7 @@ func TestJoinOnDemand_LiveElsewhere_ExistingCanonicalSession(t *testing.T) {
 
 func TestJoinOnDemand_RejectsWhenMarketMissing(t *testing.T) {
 	conductor, _ := newJoinHarness(t)
-	if _, err := conductor.JoinOnDemand(context.Background(), UserID("agent-1"), MarketID("od:nonexistent")); !errors.Is(err, ErrMarketNotLive) {
+	if _, err := conductor.JoinOnDemand(context.Background(), UserID("agent-1"), MarketID("od:nonexistent"), lifecycle.OwnerAgent); !errors.Is(err, ErrMarketNotLive) {
 		t.Fatalf("err = %v, want ErrMarketNotLive", err)
 	}
 }
@@ -135,7 +160,7 @@ func TestJoinOnDemand_RejectsWhenMarketMissing(t *testing.T) {
 func TestJoinOnDemand_RejectsCanonicalMarket(t *testing.T) {
 	conductor, _ := newJoinHarness(t)
 	marketID, _ := installLiveCanonicalMarket(t, conductor, "IN")
-	if _, err := conductor.JoinOnDemand(context.Background(), UserID("agent-1"), marketID); !errors.Is(err, ErrMarketNotLive) {
+	if _, err := conductor.JoinOnDemand(context.Background(), UserID("agent-1"), marketID, lifecycle.OwnerAgent); !errors.Is(err, ErrMarketNotLive) {
 		t.Fatalf("err = %v, want ErrMarketNotLive (wrong Mode)", err)
 	}
 }
@@ -143,7 +168,7 @@ func TestJoinOnDemand_RejectsCanonicalMarket(t *testing.T) {
 func TestJoinOnDemand_RejectsProvisioningMarket(t *testing.T) {
 	conductor, _ := newJoinHarness(t)
 	marketID, _ := installMarket(t, conductor, OnDemand, Provisioning, "IN", "od-1")
-	if _, err := conductor.JoinOnDemand(context.Background(), UserID("agent-1"), marketID); !errors.Is(err, ErrMarketNotLive) {
+	if _, err := conductor.JoinOnDemand(context.Background(), UserID("agent-1"), marketID, lifecycle.OwnerAgent); !errors.Is(err, ErrMarketNotLive) {
 		t.Fatalf("err = %v, want ErrMarketNotLive (wrong State)", err)
 	}
 }

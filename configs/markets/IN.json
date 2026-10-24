@@ -12,18 +12,11 @@
   "ondemand": {"duration": "60m", "warmup": "2m"},
   "instruments": [
     {
-      "id": "ACME",
+      "id": "SYNTH_DEF",
       "tick_size": 5,
       "band_bps": 1000,
       "seed_price": 10000,
       "liquidity": {"levels": 5, "spacing_pct": 0.1, "near_qty": 100, "taper": 0.5}
-    },
-    {
-      "id": "BETA",
-      "tick_size": 10,
-      "band_bps": 1500,
-      "seed_price": 25000,
-      "liquidity": {"levels": 5, "spacing_pct": 0.15, "near_qty": 50, "taper": 0.4}
     }
   ]
 }

@@ -22,7 +22,7 @@ func TestOpenAccountValidation(t *testing.T) {
 		wantSentinel    error
 	}{
 		{"bad owner type (below range)", OwnerType(-1), "owner-1", 100, 0, ErrBadOwnerType},
-		{"bad owner type (above range)", OwnerType(2), "owner-1", 100, 0, ErrBadOwnerType},
+		{"bad owner type (above range)", OwnerType(99), "owner-1", 100, 0, ErrBadOwnerType},
 		{"empty owner id", OwnerAgent, "", 100, 0, ErrBadOwnerID},
 		{"negative starting_capital", OwnerAgent, "owner-1", -1, 0, ErrNegativeStartingCapital},
 		{"negative starting_bank", OwnerAgent, "owner-1", 0, -1, ErrNegativeStartingBank},

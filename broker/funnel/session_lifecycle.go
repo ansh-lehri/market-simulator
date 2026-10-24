@@ -11,6 +11,14 @@ import (
 	"simulator/economy/lifecycle"
 )
 
+// liquiditySeederFundingMultiple scales the server's flat
+// StartingCapital/StartingBank for OwnerAgentOperator accounts only —
+// the liquidity-seeder identities need enough capital to rest asks
+// and lift them as takers across several instruments without
+// starving, well beyond a normal agent's funding. A placeholder
+// calibration value like every other money dial, not fitted.
+const liquiditySeederFundingMultiple = 20
+
 // EnsureAccount is BROKER_PHASE2 §1 Point 1 — the get-or-create for a
 // durable account. Every session entry (canonical and on-demand) begins
 // here. Off-shard, runs on the caller's goroutine, Postgres-only; does
@@ -64,11 +72,16 @@ func (broker *Broker) ensureAccount(
 	ownerID string,
 	allowRetry bool,
 ) (AccountID, error) {
+	startingCapital, startingBank := broker.money.StartingCapital, broker.money.StartingBank
+	if ownerType == lifecycle.OwnerAgentOperator {
+		startingCapital *= liquiditySeederFundingMultiple
+		startingBank *= liquiditySeederFundingMultiple
+	}
 	slog.Debug("funnel: EnsureAccount begin",
 		"owner_type", ownerType,
 		"owner_id", ownerID,
-		"starting_capital", broker.money.StartingCapital,
-		"starting_bank", broker.money.StartingBank,
+		"starting_capital", startingCapital,
+		"starting_bank", startingBank,
 		"allow_retry", allowRetry,
 	)
 
@@ -76,8 +89,8 @@ func (broker *Broker) ensureAccount(
 		ctx,
 		ownerType,
 		ownerID,
-		broker.money.StartingCapital,
-		broker.money.StartingBank,
+		startingCapital,
+		startingBank,
 	)
 	switch {
 	case openErr == nil:

@@ -26,9 +26,17 @@ import (
 //     already uses for the human's own session on this same market.
 //
 // This endpoint's only caller is L2 — a human never calls it, since
-// StartOnDemand already creates the human's own session inline — so
-// EnsureAccount is called with lifecycle.OwnerAgent unconditionally,
-// no owner_type wire field needed.
+// StartOnDemand already creates the human's own session inline.
+// ownerType is the caller's resolved identity class: real agents send
+// "agent" (the HTTP handler defaults an omitted wire value to this),
+// liquidity-seeder identities send "agent_operator". Passed straight
+// through to EnsureAccount — getting this wrong means the session
+// installs on a DIFFERENT account row than the one the caller already
+// opened (EnsureAccount is keyed by (owner_type, owner_id), so the
+// same owner_id under two owner_types is two separate accounts), and
+// every subsequent order/seed-inventory call against the caller's
+// real account 409s with "no session" even though *a* session was
+// installed — just not on that account.
 //
 // Returns JoinResult{SessionID, ParticipantID} on success. Error paths:
 //
@@ -36,10 +44,11 @@ import (
 //   - ErrLiveElsewhere  — agent is live on a different market, or has a
 //     transient session on this one.
 //   - wrapped broker error — any EnsureAccount or StartSession failure.
-func (conductor *Conductor) JoinOnDemand(ctx context.Context, agentUserID UserID, marketID MarketID) (JoinResult, error) {
+func (conductor *Conductor) JoinOnDemand(ctx context.Context, agentUserID UserID, marketID MarketID, ownerType lifecycle.OwnerType) (JoinResult, error) {
 	conductor.log.Info("conductor: JoinOnDemand begin",
 		"user", agentUserID,
 		"market_id", marketID,
+		"owner_type", ownerType,
 	)
 
 	// ---- RESERVE (lock take #1 — microseconds) ----
@@ -97,7 +106,7 @@ func (conductor *Conductor) JoinOnDemand(ctx context.Context, agentUserID UserID
 	)
 
 	// ---- OFF-LOCK: EnsureAccount ----
-	accountID, ensureErr := conductor.broker.EnsureAccount(ctx, lifecycle.OwnerAgent, string(agentUserID))
+	accountID, ensureErr := conductor.broker.EnsureAccount(ctx, ownerType, string(agentUserID))
 	if ensureErr != nil {
 		conductor.rollbackJoin(sessionID, agentUserID)
 		conductor.log.Error("conductor: JoinOnDemand ensure-account failed",

@@ -3,6 +3,9 @@ package funnel
 import (
 	"fmt"
 	"log/slog"
+	"time"
+
+	"simulator/economy/account"
 )
 
 // dispatch is the type-switch that routes an inbound command to the
@@ -23,6 +26,8 @@ func (ownerShard *shard) dispatch(cmd Command) {
 		typedCmd.ReplyTo <- ownerShard.handleCancel(typedCmd)
 	case Transfer:
 		typedCmd.ReplyTo <- ownerShard.handleTransfer(typedCmd)
+	case SeedInventory:
+		typedCmd.ReplyTo <- ownerShard.handleSeedInventory(typedCmd)
 	case ReadBalance:
 		typedCmd.ReplyTo <- ownerShard.handleReadBalance(typedCmd)
 	case ReadPositions:
@@ -159,6 +164,68 @@ func (ownerShard *shard) handleTransfer(cmd Transfer) TransferResult {
 		Available: sess.account.Account.Cash.Available,
 		Bank:      sess.account.Account.Cash.Bank,
 	}
+}
+
+// handleSeedInventory is the bringup-time inventory-mint body
+// (BROKER_SEED_INVENTORY §4). Runs on the owner goroutine; two outcomes:
+//
+//   - !live                        → SeedInventoryResult{Present:false} (HTTP → 409, no durable fallback, SI-D1)
+//   - CreditPosition err (<=0 args) → SeedInventoryResult{Present:true, Err} (HTTP → 500; pre-funnel 400 should have
+//     caught this, so reaching here is a caller bug — SI-D2: return, don't panic)
+//   - ok                            → SeedInventoryResult{Present:true, Available} (HTTP → 200)
+//
+// The account is reached via sess.account.Account.Positions — same
+// LoadedAccount-envelope indirection handleTransfer takes to reach
+// .Cash. The Positions map and the per-instrument Position are both
+// lazy-initialized here exactly as the ordinary buy-fill path
+// (convertBuy) does, since account exposes no ensure-position helper.
+func (ownerShard *shard) handleSeedInventory(cmd SeedInventory) SeedInventoryResult {
+	slog.Debug("funnel: handleSeedInventory begin",
+		"account_id", cmd.AccountID,
+		"instrument", cmd.Instrument,
+		"qty", cmd.Qty,
+		"entry_price", cmd.EntryPrice,
+	)
+
+	sess, live := ownerShard.sessions[cmd.AccountID]
+	if !live {
+		slog.Debug("funnel: handleSeedInventory not live", "account_id", cmd.AccountID)
+		return SeedInventoryResult{Present: false}
+	}
+
+	acct := sess.account.Account
+	if acct.Positions == nil {
+		acct.Positions = map[InstrumentID]*account.Position{}
+	}
+	pos := acct.Positions[cmd.Instrument]
+	if pos == nil {
+		pos = &account.Position{}
+		acct.Positions[cmd.Instrument] = pos
+	}
+
+	if err := pos.CreditPosition(cmd.Qty, cmd.EntryPrice, time.Now()); err != nil {
+		slog.Error("funnel: handleSeedInventory CreditPosition rejected (caller bug — should be pre-validated)",
+			"account_id", cmd.AccountID,
+			"session_id", sess.binding.SessionID,
+			"instrument", cmd.Instrument,
+			"qty", cmd.Qty,
+			"entry_price", cmd.EntryPrice,
+			"err", err,
+		)
+		return SeedInventoryResult{Present: true, Err: err}
+	}
+
+	ownerShard.bundle.Persist.MarkSnapshotDirty(sess.binding.SessionID, cmd.AccountID)
+
+	slog.Info("funnel: handleSeedInventory ok",
+		"account_id", cmd.AccountID,
+		"session_id", sess.binding.SessionID,
+		"instrument", cmd.Instrument,
+		"qty", cmd.Qty,
+		"entry_price", cmd.EntryPrice,
+		"post_available", pos.Available,
+	)
+	return SeedInventoryResult{Present: true, Available: pos.Available}
 }
 
 // handleReadBalance is the live-balance read on the owner goroutine.

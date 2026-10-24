@@ -103,6 +103,27 @@ type TransferResult struct {
 	Err       error
 }
 
+// SeedInventoryResult is the reply to a SeedInventory command
+// (BROKER_SEED_INVENTORY §1). Two outcomes, discriminated by (Present, Err):
+//
+//   - Present:false         — no live session for this account on this
+//     shard. Unlike Transfer there is NO durable
+//     fallback for a mint (SI-D1) — the HTTP
+//     handler maps this straight to 409.
+//   - Present:true, Err set — CreditPosition rejected the mint. Its only
+//     failure modes (Qty<=0 / EntryPrice<=0) are
+//     already validated to 400 before the command
+//     is built, so reaching this is a caller bug,
+//     not a business outcome; HTTP maps it to 500
+//     (SI-D2 — return, don't panic, on this path).
+//   - Present:true, Err nil  — success; Available is the post-mint
+//     PosAvailable for the seeded instrument.
+type SeedInventoryResult struct {
+	Present   bool
+	Available int64
+	Err       error
+}
+
 // BalanceSnapshot is the four-bucket Cash copy returned by the balance
 // read. Present:false means the account has no live session on this
 // shard (HTTP maps that to 409); the four int64 fields are zero in

@@ -28,46 +28,59 @@ func (sessionType SessionType) String() string {
 }
 
 // OwnerType matches the accounts.owner_type column values (schema §2.1:
-// TEXT NOT NULL, CHECK'd downstream to {'agent','human'}). Used by
-// open_account (item 18) to write the durable identity row.
+// TEXT NOT NULL; no DB-level CHECK, enforced in application code here).
+// Used by open_account (item 18) to write the durable identity row.
+//
+// OwnerAgentOperator is the liquidity-seeder identity class (L2's
+// dumb "operator" agents that bootstrap a market's book at bringup —
+// see docs/agents/LIQUIDITY_SEEDER.md in simulation-agents). Distinct
+// from OwnerAgent so the funding multiplier in
+// broker/funnel/session_lifecycle.go can single it out without
+// touching every other agent account.
 type OwnerType int
 
 const (
 	OwnerAgent OwnerType = iota
 	OwnerHuman
+	OwnerAgentOperator
 )
 
-// String returns the on-wire / on-DB column value ("agent" / "human"). The
-// accounts.owner_type column stores this exact text — never the enum ordinal.
+// String returns the on-wire / on-DB column value. The accounts.owner_type
+// column stores this exact text — never the enum ordinal.
 func (ownerType OwnerType) String() string {
 	switch ownerType {
 	case OwnerAgent:
 		return "agent"
 	case OwnerHuman:
 		return "human"
+	case OwnerAgentOperator:
+		return "agent_operator"
 	default:
 		return "unknown"
 	}
 }
 
-// isValid reports whether the enum value is one of the two legal
-// constants (rejects OwnerType(2), OwnerType(-1), etc). Used by
-// open_account's input validation.
+// isValid reports whether the enum value is one of the legal constants
+// (rejects OwnerType(99), OwnerType(-1), etc). Used by open_account's
+// input validation.
 func (ownerType OwnerType) isValid() bool {
-	return ownerType == OwnerAgent || ownerType == OwnerHuman
+	return ownerType == OwnerAgent || ownerType == OwnerHuman || ownerType == OwnerAgentOperator
 }
 
-// ParseOwnerType maps the wire/column string ("agent" / "human") back to
-// the typed enum — the inverse of String(). Any other value, including
-// "", is ErrBadOwnerType; a caller that wants a default for an omitted
-// field resolves it before calling this, not here, so this stays a
-// strict parse with no implicit fallback.
+// ParseOwnerType maps the wire/column string ("agent" / "human" /
+// "agent_operator") back to the typed enum — the inverse of String().
+// Any other value, including "", is ErrBadOwnerType; a caller that
+// wants a default for an omitted field resolves it before calling
+// this, not here, so this stays a strict parse with no implicit
+// fallback.
 func ParseOwnerType(wireValue string) (OwnerType, error) {
 	switch wireValue {
 	case "agent":
 		return OwnerAgent, nil
 	case "human":
 		return OwnerHuman, nil
+	case "agent_operator":
+		return OwnerAgentOperator, nil
 	default:
 		return OwnerAgent, ErrBadOwnerType
 	}

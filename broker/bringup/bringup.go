@@ -11,6 +11,7 @@ import (
 	"simulator/broker/marketdata"
 	"simulator/broker/order"
 	"simulator/broker/reads"
+	"simulator/broker/seedinventory"
 	"simulator/broker/store"
 	"simulator/broker/transfer"
 	"simulator/connectivity/config"
@@ -238,6 +239,7 @@ func bringUp(ctx context.Context, brokerCfg BrokerConfig, infraCfg config.Config
 //   - the three Phase-5 order write routes from broker/order
 //     (POST /v1/orders, /v1/orders/cancel, /v1/orders/modify)
 //   - the Phase-3 POST /v1/account/transfer from broker/transfer
+//   - the bringup-time POST /v1/account/seed-inventory from broker/seedinventory
 //   - the Phase-7 GET /v1/candles history route from broker/marketdata
 //
 // GET /v1/ws is NOT registered here — the per-session FanOut dispatch is
@@ -260,6 +262,7 @@ func buildMux(
 	readsCfg := reads.Config{ReadTimeout: brokerCfg.readTimeoutOrDefault()}
 	orderCfg := order.Config{OrderTimeout: brokerCfg.orderTimeoutOrDefault()}
 	transferCfg := transfer.Config{TransferTimeout: brokerCfg.transferTimeoutOrDefault()}
+	seedCfg := seedinventory.Config{SeedTimeout: brokerCfg.seedTimeoutOrDefault()}
 
 	mux := http.NewServeMux()
 	mux.Handle(reads.PathBalance, reads.NewBalanceHandler(brokerInstance, readsCfg))
@@ -278,12 +281,15 @@ func buildMux(
 
 	mux.Handle(transfer.Path, transfer.NewHandler(brokerInstance, brokerStore, transferCfg))
 
+	mux.Handle(seedinventory.Path, seedinventory.NewHandler(brokerInstance, seedCfg))
+
 	marketData.RegisterCandlesRoute(mux)
 
 	slog.Info("bringup: http mux built",
 		"read_routes", 9,
 		"order_routes", 3,
 		"transfer_routes", 1,
+		"seed_inventory_routes", 1,
 		"marketdata_routes", 1,
 	)
 	return mux

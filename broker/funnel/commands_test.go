@@ -22,6 +22,7 @@ var (
 	_ Command = PlaceOrder{}
 	_ Command = CancelOrder{}
 	_ Command = Transfer{}
+	_ Command = SeedInventory{}
 	_ Command = ReadBalance{}
 	_ Command = ReadPositions{}
 	_ Command = ReadOpenOrders{}
@@ -40,6 +41,7 @@ func TestCommand_AccountReturnsRoutingKey(t *testing.T) {
 		{"PlaceOrder", PlaceOrder{AccountID: wantAccount}},
 		{"CancelOrder", CancelOrder{AccountID: wantAccount}},
 		{"Transfer", Transfer{AccountID: wantAccount, From: account.Bank, To: account.Available, Amount: 1}},
+		{"SeedInventory", SeedInventory{AccountID: wantAccount, Instrument: "ACME", Qty: 1, EntryPrice: 1}},
 		{"ReadBalance", ReadBalance{AccountID: wantAccount}},
 		{"ReadPositions", ReadPositions{AccountID: wantAccount}},
 		{"ReadOpenOrders", ReadOpenOrders{AccountID: wantAccount}},

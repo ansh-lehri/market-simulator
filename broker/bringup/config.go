@@ -34,6 +34,12 @@ const defaultOrderTimeout = 2 * time.Second
 // durable UPDATE round-trip. Tests + demos dial; real deploys set it.
 const defaultTransferTimeout = 2 * time.Second
 
+// defaultSeedTimeout is the per-request deadline the seed-inventory
+// HTTP handler uses when the caller leaves BrokerConfig.SeedTimeout at
+// zero (BROKER_SEED_INVENTORY §5). Tests + demos dial; real deploys set
+// it.
+const defaultSeedTimeout = 2 * time.Second
+
 // Phase-7 (B10 tape relay + market-data component) tunables. Dials
 // live here so bringup validates once; marketdata.NewMarketData reads
 // marketdata.Config{ReadTimeout} + marketdata.WSConfig{...} composed
@@ -118,6 +124,12 @@ type BrokerConfig struct {
 	// ReadTimeout / OrderTimeout. Negative → ErrBadConfig.
 	TransferTimeout time.Duration
 
+	// SeedTimeout bounds the seed-inventory HTTP handler's broker round-
+	// trip (BROKER_SEED_INVENTORY §5). Zero → defaultSeedTimeout, same
+	// caller-friendly convention as ReadTimeout / OrderTimeout /
+	// TransferTimeout. Negative → ErrBadConfig.
+	SeedTimeout time.Duration
+
 	// --- Phase-7 (B10 market-data) tunables ---------------------------
 	// All six fall back to default* consts on zero; validate rejects
 	// negatives. Threaded into marketdata.NewMarketData at bringUp as
@@ -188,6 +200,9 @@ func (brokerCfg BrokerConfig) validate() error {
 	if brokerCfg.TransferTimeout < 0 {
 		return fmt.Errorf("TransferTimeout=%v (must be >= 0; zero means default): %w", brokerCfg.TransferTimeout, ErrBadConfig)
 	}
+	if brokerCfg.SeedTimeout < 0 {
+		return fmt.Errorf("SeedTimeout=%v (must be >= 0; zero means default): %w", brokerCfg.SeedTimeout, ErrBadConfig)
+	}
 	if brokerCfg.CandleReadTimeout < 0 {
 		return fmt.Errorf("CandleReadTimeout=%v (must be >= 0): %w", brokerCfg.CandleReadTimeout, ErrBadConfig)
 	}
@@ -253,6 +268,17 @@ func (brokerCfg BrokerConfig) transferTimeoutOrDefault() time.Duration {
 		return defaultTransferTimeout
 	}
 	return brokerCfg.TransferTimeout
+}
+
+// seedTimeoutOrDefault returns the configured SeedTimeout, falling back
+// to defaultSeedTimeout on zero. validate() rejects negatives;
+// seedinventory.Config.Validate inside NewHandler requires strictly-
+// positive, so we hand it a non-zero number here.
+func (brokerCfg BrokerConfig) seedTimeoutOrDefault() time.Duration {
+	if brokerCfg.SeedTimeout == 0 {
+		return defaultSeedTimeout
+	}
+	return brokerCfg.SeedTimeout
 }
 
 // --- Phase-7 marketdata zero-to-default accessors ---------------------

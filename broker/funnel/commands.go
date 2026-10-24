@@ -73,6 +73,28 @@ type Transfer struct {
 // Account returns the routing key for the funnel router.
 func (cmd Transfer) Account() AccountID { return cmd.AccountID }
 
+// SeedInventory — bringup-time inventory mint for a seller-seeder
+// account (BROKER_SEED_INVENTORY §1). Unlike Transfer, this is not a
+// move between two buckets — it is a mint, the same unit-creation
+// convertBuy already performs on every ordinary buy-fill, done
+// explicitly at bringup so a seeder has units to rest asks with before
+// the session ever trades. No cash side, no counterparty.
+//
+// Qty and EntryPrice are strictly positive (handler-validated before
+// the command is built, root value discipline); EntryPrice becomes the
+// FIFO cost basis for the minted lot and so governs realized-P&L on
+// both a voluntary close and auto-square.
+type SeedInventory struct {
+	AccountID  AccountID
+	Instrument InstrumentID
+	Qty        int64
+	EntryPrice int64
+	ReplyTo    chan SeedInventoryResult // buffered(1); caller-owned
+}
+
+// Account returns the routing key for the funnel router.
+func (cmd SeedInventory) Account() AccountID { return cmd.AccountID }
+
 // ReadBalance — Tier 4 live-balance read. Copy-out contract: the handler
 // returns a by-value snapshot, never a pointer into the owned Account
 // (BROKER_TIER0 §5, read rule).

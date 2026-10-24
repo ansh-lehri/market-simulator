@@ -230,6 +230,39 @@ func (broker *Broker) Transfer(
 	}
 }
 
+// SeedInventory mints bringup-time inventory onto a live session's
+// position for the given instrument (BROKER_SEED_INVENTORY §2). Thin
+// shard round-trip, identical shape to Transfer: a fresh buffered(1)
+// reply channel, route onto the owning shard, select on reply vs ctx.
+//
+// Unlike Transfer there is no durable-on-miss orchestration to leave to
+// the caller — Present:false is SeedInventory's hard error (SI-D1), not
+// a signal to fall back to a durable path. This method still returns
+// whatever the shard replied, verbatim; the HTTP handler owns mapping
+// Present:false to 409.
+func (broker *Broker) SeedInventory(
+	ctx context.Context,
+	accountID AccountID,
+	instrument InstrumentID,
+	qty int64,
+	entryPrice int64,
+) (SeedInventoryResult, error) {
+	replyChannel := make(chan SeedInventoryResult, 1)
+	broker.route(SeedInventory{
+		AccountID:  accountID,
+		Instrument: instrument,
+		Qty:        qty,
+		EntryPrice: entryPrice,
+		ReplyTo:    replyChannel,
+	})
+	select {
+	case reply := <-replyChannel:
+		return reply, nil
+	case <-ctx.Done():
+		return SeedInventoryResult{}, ErrBrokerTimeout
+	}
+}
+
 // ReadBalance requests a live balance snapshot for the given account.
 // Copy-out semantics live in the handler (BROKER_TIER0 §Point-5 read
 // rule); the returned value is a by-value copy, never a pointer into
