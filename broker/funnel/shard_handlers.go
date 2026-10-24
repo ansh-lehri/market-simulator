@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"simulator/economy/account"
-	"simulator/economy/realize"
 )
 
 // dispatch is the type-switch that routes an inbound command to the
@@ -321,16 +320,11 @@ func (ownerShard *shard) handleReadObservation(cmd ReadObservation) ObservationL
 		slog.Debug("funnel: handleReadObservation not live", "account_id", cmd.AccountID)
 		return ObservationLive{Present: false}
 	}
-	var liveTrades []ClosedTradeLive
-	if ownerShard.realiz != nil {
-		liveTrades = toClosedTradeLive(ownerShard.realiz.RecentLiveTrades(20))
-	}
 	observation := ObservationLive{
 		Present:    true,
 		Balance:    readBalance(session),
 		Positions:  readPositions(ownerShard, session, ""),
 		OpenOrders: readOpenOrders(ownerShard, cmd.AccountID),
-		LiveTrades: liveTrades,
 	}
 	slog.Debug("funnel: handleReadObservation ok",
 		"account_id", cmd.AccountID,
@@ -348,32 +342,4 @@ func (ownerShard *shard) handleReadObservation(cmd ReadObservation) ObservationL
 // handleFireStop is the Tier-2 stop-fire seam. Push command; no reply.
 func (ownerShard *shard) handleFireStop(cmd FireStop) {
 	_ = cmd
-}
-
-// toClosedTradeLive converts the Realizer's on-demand ring to the funnel's
-// wire shape. Returns nil when the input is nil (canonical session path).
-func toClosedTradeLive(rows []realize.ClosedTradeRow) []ClosedTradeLive {
-	if len(rows) == 0 {
-		return nil
-	}
-	out := make([]ClosedTradeLive, len(rows))
-	for i, row := range rows {
-		s := row.Summary
-		out[i] = ClosedTradeLive{
-			TradeID:    s.TradeID,
-			Instrument: string(s.InstrumentID),
-			Direction:  s.Direction,
-			Quantity:   s.Quantity,
-			EntryPrice: s.EntryPrice,
-			ExitPrice:  s.ExitPrice,
-			EntryAt:    s.EntryAt,
-			ExitAt:     s.ExitAt,
-			GrossPnl:   s.GrossPnl,
-			TotalCosts: s.TotalCosts,
-			NetPnl:     s.NetPnl,
-			PnlPct:     s.PnlPct,
-			ExitReason: string(s.ExitReason),
-		}
-	}
-	return out
 }

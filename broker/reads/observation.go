@@ -83,9 +83,6 @@ func (handlerInstance *observationHandler) ServeHTTP(responseWriter http.Respons
 	}()
 	go func() {
 		defer waitGroup.Done()
-		// For on-demand sessions trades come from the live ring (see below);
-		// we still fan the Postgres read out in parallel so canonical sessions
-		// pay no extra latency. The result is discarded when LiveTrades is set.
 		trades, tradesErr = handlerInstance.durableStore.RecentTrades(requestCtx, store.AccountID(accountID), observationRecentTradesLimit)
 	}()
 	waitGroup.Wait()
@@ -110,20 +107,14 @@ func (handlerInstance *observationHandler) ServeHTTP(responseWriter http.Respons
 		"positions": shapePositions(live.Positions),
 		"orders":    shapeOrders(live.OpenOrders),
 	}
-	switch {
-	case len(live.LiveTrades) > 0:
-		// On-demand session: serve the Realizer's in-memory ring directly.
-		// PersistOnClose=false means Postgres has nothing; LiveTrades is the source.
-		response["recent_trades"] = shapeClosedTradeLive(live.LiveTrades)
-		response["trades_degraded"] = false
-	case tradesErr != nil:
+	if tradesErr != nil {
 		slog.Warn("broker/reads: observation trades degraded",
 			"account_id", accountID,
 			"err", tradesErr,
 		)
 		response["recent_trades"] = []map[string]any{}
 		response["trades_degraded"] = true
-	default:
+	} else {
 		response["recent_trades"] = shapeTrades(trades)
 		response["trades_degraded"] = false
 	}

@@ -101,30 +101,6 @@ func shapeCostBreakdowns(breakdowns []store.TradeCostBreakdown) []map[string]any
 	return rows
 }
 
-// shapeClosedTradeLive emits the same JSON shape as shapeTrades but from the
-// Realizer's live ring (on-demand sessions). Field names must stay in sync.
-func shapeClosedTradeLive(rows []funnel.ClosedTradeLive) []map[string]any {
-	trades := make([]map[string]any, 0, len(rows))
-	for _, row := range rows {
-		trades = append(trades, map[string]any{
-			"trade_id":    row.TradeID,
-			"instrument":  row.Instrument,
-			"direction":   row.Direction,
-			"quantity":    row.Quantity,
-			"entry_price": row.EntryPrice,
-			"exit_price":  row.ExitPrice,
-			"entry_at":    row.EntryAt,
-			"exit_at":     row.ExitAt,
-			"gross_pnl":   row.GrossPnl,
-			"total_costs": row.TotalCosts,
-			"net_pnl":     row.NetPnl,
-			"pnl_pct":     row.PnlPct,
-			"exit_reason": row.ExitReason,
-		})
-	}
-	return trades
-}
-
 func shapeTrades(rows []store.TradeRow) []map[string]any {
 	trades := make([]map[string]any, 0, len(rows))
 	for _, row := range rows {

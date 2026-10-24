@@ -1,10 +1,6 @@
 package funnel
 
-import (
-	"time"
-
-	"simulator/contract"
-)
+import "simulator/contract"
 
 // Reply-payload shapes for every command the funnel receives. Each
 // request/response command (place, cancel, transfer, the four reads)
@@ -210,42 +206,19 @@ type OpenOrderView struct {
 	CancelInFlight bool
 }
 
-// ClosedTradeLive is one closed round-trip from the Realizer's in-memory ring,
-// present only for on-demand (practice) sessions — canonical sessions never
-// populate it (they write to Postgres instead). The field set mirrors
-// store.TradeRow so shaping.go can emit identical JSON for both.
-type ClosedTradeLive struct {
-	TradeID    string
-	Instrument string
-	Direction  string
-	Quantity   int64
-	EntryPrice int64
-	ExitPrice  int64
-	EntryAt    time.Time
-	ExitAt     time.Time
-	GrossPnl   int64
-	TotalCosts int64
-	NetPnl     int64
-	PnlPct     float64
-	ExitReason string
-}
-
 // ObservationLive is the live half of the observation read — balance +
 // positions + working orders assembled in one visit to the owning
 // shard so the three sub-payloads cannot interleave with a fill. The
 // durable half (recent closed trades) is merged in by the HTTP handler
-// on a separate goroutine for canonical sessions; on-demand sessions
-// use LiveTrades instead (Postgres is never written for those).
+// on a separate goroutine; it is not threaded through here.
 //
-// Present:false → 409 (no live session); the other fields are zero.
+// Present:false → 409 (no live session); the three sub-payloads are
+// zero in that case.
 type ObservationLive struct {
 	Present    bool
 	Balance    BalanceSnapshot
 	Positions  []PositionView
 	OpenOrders []OpenOrderView
-	// LiveTrades is non-nil only for on-demand sessions. The HTTP handler
-	// skips the Postgres read when this is non-empty.
-	LiveTrades []ClosedTradeLive
 }
 
 // StopRecord is the payload of a FireStop command. Body owned by Tier 2.
