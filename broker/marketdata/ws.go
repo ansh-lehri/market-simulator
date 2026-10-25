@@ -299,11 +299,20 @@ func (handlerInstance *wsHandler) handleUnsubscribe(conn *Conn, items []wsInboun
 }
 
 // validateSubItem checks one inbound sub for: valid stream, non-empty
-// instrument on the FanOut's tape-learned list, and (for candle subs)
-// valid timeframe. Returns the parsed subRequest + "" on success, or
-// zero + a human-readable error string on failure (per WS protocol
-// §3.1 error reasons: "unknown instrument", "bad timeframe",
+// instrument, and (for candle subs) valid timeframe. Returns the parsed
+// subRequest + "" on success, or zero + a human-readable error string on
+// failure (per WS protocol §3.1 error reasons: "bad timeframe",
 // "bad stream").
+//
+// Note: we intentionally do NOT reject instruments that are not yet
+// tape-learned. The exchange emits KindQuote/KindDepth/KindTrade only
+// after the first order, so a client that connects during pre-open (before
+// any order is placed) would always get "unknown instrument" nacks. L7 is
+// designed to delay client bindings until ticks have flowed, but L7 is not
+// yet built; rejecting unknown instruments here breaks the simulation
+// agents' live-feed subscription. A subscription for an instrument that
+// never appears on the tape is harmless — the subscriber simply receives no
+// frames for that instrument.
 func (handlerInstance *wsHandler) validateSubItem(item wsInboundSubItem) (subRequest, string) {
 	parsedStream, streamOK := parseStream(item.Stream)
 	if !streamOK {
@@ -311,9 +320,6 @@ func (handlerInstance *wsHandler) validateSubItem(item wsInboundSubItem) (subReq
 	}
 	if item.Instrument == "" {
 		return subRequest{}, "instrument required"
-	}
-	if !handlerInstance.fanOut.KnownInstrument(contract.InstrumentID(item.Instrument)) {
-		return subRequest{}, "unknown instrument"
 	}
 	if parsedStream == streamSnapshot {
 		// Snapshot subs ignore any timeframe field — TF stays 0.

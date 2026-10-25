@@ -91,6 +91,20 @@ type snapshotFrame struct {
 }
 
 func (frame snapshotFrame) marshal(_ *time.Location) ([]byte, error) {
+	// Guard: instrumentSnap is nil when a KindSession event fires before
+	// the first KindQuote/KindTrade/KindDepth for an instrument (i.e. the
+	// instrument has not yet been tape-learned). Clients that subscribe
+	// before the first order is placed can receive this frame. Return a
+	// minimal snapshot carrying the current phase with all price flags
+	// false so the client knows the phase without a nil-deref panic.
+	if frame.instrumentSnap == nil {
+		return json.Marshal(wsSnapshotFrame{
+			Type:       "snapshot",
+			Instrument: string(frame.instrument),
+			Data:       wsSnapshotData{Phase: frame.phase.String()},
+		})
+	}
+
 	// Compute change_pct — the ONE float on the wire. Zero when the
 	// session base isn't seeded yet (HasOpen=false) OR when SessionOpen
 	// is 0 (defensive against div-by-zero if the exchange ever reports

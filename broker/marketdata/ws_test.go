@@ -248,8 +248,10 @@ func TestWS_Subscribe_CandleStream_AckOK_NoSeed(t *testing.T) {
 
 func TestWS_Subscribe_BatchMixedOkAndError_PerSubAck(t *testing.T) {
 	server, _, snap := wsTestServer(t)
-	snap.SetLast("ACME", 10_050) // known
-	// BETA not tape-learned → "unknown instrument".
+	snap.SetLast("ACME", 10_050) // known, seeds a snapshot slot
+	// BETA not tape-learned — subscriptions are accepted regardless of
+	// tape-learn state (the validator no longer rejects unknown instruments
+	// to avoid breaking clients that connect before the first tape event).
 
 	socket := dialWS(t, server)
 	_ = readOneJSON(t, socket)
@@ -257,10 +259,10 @@ func TestWS_Subscribe_BatchMixedOkAndError_PerSubAck(t *testing.T) {
 	writeJSONFrame(t, socket, map[string]any{
 		"type": "subscribe",
 		"subs": []map[string]any{
-			{"stream": "snapshot", "instrument": "ACME"},             // ok
-			{"stream": "snapshot", "instrument": "BETA"},             // unknown instrument
-			{"stream": "candle", "instrument": "ACME", "timeframe": "15m"}, // bad timeframe
-			{"stream": "trade", "instrument": "ACME"},                // bad stream
+			{"stream": "snapshot", "instrument": "ACME"},                    // ok, tape-learned
+			{"stream": "snapshot", "instrument": "BETA"},                    // ok, not yet tape-learned but accepted
+			{"stream": "candle", "instrument": "ACME", "timeframe": "15m"}, // error: bad timeframe
+			{"stream": "trade", "instrument": "ACME"},                       // error: bad stream
 		},
 	})
 
@@ -274,7 +276,7 @@ func TestWS_Subscribe_BatchMixedOkAndError_PerSubAck(t *testing.T) {
 		errMsg string
 	}{
 		{"ok", ""},
-		{"error", "unknown instrument"},
+		{"ok", ""},           // BETA accepted — no "unknown instrument" rejection
 		{"error", "bad timeframe"},
 		{"error", "bad stream"},
 	}

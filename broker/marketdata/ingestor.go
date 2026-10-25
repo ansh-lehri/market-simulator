@@ -197,6 +197,12 @@ func routeTapeEvent(
 		// we publish only against the specific instrument carried on
 		// the event. Any subscriber of that instrument snapshot stream
 		// will see the new phase on their next packet.
+		//
+		// Note: Get may return nil if no KindQuote/KindTrade/KindDepth
+		// has arrived for this instrument yet (instrument not yet tape-
+		// learned). snapshotFrame.marshal handles nil snap gracefully —
+		// it emits the phase with zero price data so clients still see
+		// the transition without a panic.
 		fanOut.PublishSnapshot(event.Instrument, marketSnapshot.Get(event.Instrument), marketSnapshot.Phase())
 
 	default:
