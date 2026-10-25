@@ -71,12 +71,12 @@ func TestHandleJoinOnDemand_RequestValidation(t *testing.T) {
 	}
 }
 
-func TestHandleJoinOnDemand_NoLiveMarketReturns409(t *testing.T) {
+func TestHandleJoinOnDemand_NoLiveMarketReturns503(t *testing.T) {
 	conductor, _ := newHandlerHarness(t)
 	recorder := postOnDemandJoin(t, conductor, http.MethodPost,
 		`{"user":{"user_id":"agent-1"},"exchange_id":"od:nonexistent"}`)
-	if recorder.Code != http.StatusConflict {
-		t.Fatalf("status = %d, want 409. body=%q", recorder.Code, recorder.Body.String())
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503. body=%q", recorder.Code, recorder.Body.String())
 	}
 }
 

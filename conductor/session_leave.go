@@ -343,18 +343,31 @@ func (conductor *Conductor) tearDownOnDemandInstance(ctx context.Context, market
 	}
 	market.State = TearingDown
 
-	// On-demand starts with one member (the human who triggered spin-up),
-	// but agents are joined concurrently during bring-up and their sessions
-	// are also registered in market.members. Snapshot the human's session
-	// for the off-lock EndSession call; the reap step below cleans up all
-	// members.
-	var singleMemberSessionID SessionID
-	for sessionID := range market.members {
-		singleMemberSessionID = sessionID
-		break
+	// Snapshot all member sessions during the lock-hold. Collect (sessionID, accountID)
+	// pairs for every member that has a completed broker install (Account set at FINALIZE).
+	// Sessions in Starting state (Account == "") have no broker-side session yet and are
+	// skipped here; REAP (lock take #2 below) cleans all conductor-side records regardless.
+	// All on-demand accounts are ephemeral — both the human's and every agent's — so
+	// EndSession must be called for each to discard the shard's LoadedAccount.
+	type endCmd struct {
+		sessionID SessionID
+		accountID AccountID
 	}
-	memberSession := conductor.reg.sessions[singleMemberSessionID]
-	if memberSession == nil {
+	var endCmds []endCmd
+	var logUserID UserID
+	var foundAnySession bool
+	for memberSessionID := range market.members {
+		if sess := conductor.reg.sessions[memberSessionID]; sess != nil {
+			foundAnySession = true
+			if logUserID == "" {
+				logUserID = sess.User
+			}
+			if sess.Account != "" {
+				endCmds = append(endCmds, endCmd{sessionID: memberSessionID, accountID: sess.Account})
+			}
+		}
+	}
+	if !foundAnySession {
 		// Market was Live but carried no corresponding session record
 		// — a wiring bug upstream, but the teardown's reap can still
 		// drop the orphan market. Log loudly and continue.
@@ -363,7 +376,6 @@ func (conductor *Conductor) tearDownOnDemandInstance(ctx context.Context, market
 		conductor.reg.mu.Unlock()
 		conductor.log.Error("conductor: tearDownOnDemandInstance market has no corresponding session record — reaping orphan market",
 			"market_id", marketID,
-			"snapshot_session_id", singleMemberSessionID,
 		)
 		if exchangeHandleForTeardown != nil {
 			exchangeHandleForTeardown.Stop()
@@ -387,36 +399,36 @@ func (conductor *Conductor) tearDownOnDemandInstance(ctx context.Context, market
 		conductor.reg.mu.Unlock()
 		return
 	}
-	accountID := memberSession.Account
-	userID := memberSession.User
 	exchangeHandleForTeardown := market.exch
 	marketTagForTeardown := market.Tag
 	conductor.reg.mu.Unlock()
 	conductor.log.Info("conductor: tearDownOnDemandInstance flipped to TearingDown",
 		"market_id", marketID,
 		"tag", marketTagForTeardown,
-		"session_id", singleMemberSessionID,
-		"user", userID,
-		"account_id", accountID,
+		"member_count", len(market.members),
+		"active_member_count", len(endCmds),
+		"user", logUserID,
 	)
 
-	// ---- OFF-LOCK: broker.EndSession (OnDemand = discard) ----
-	// Forward-progress on any error — the on-demand teardown contract
-	// is "always reach Stop + reap." Log the error for operability;
-	// the ephemeral account is dropped from the shard regardless, so
-	// nothing is left half-ended.
-	endErr := conductor.broker.EndSession(ctx, funnel.SessionEndCmd{
-		AccountID: funnel.AccountID(accountID),
-		SessionID: funnel.SessionID(singleMemberSessionID),
-		Mode:      lifecycle.OnDemand,
-	})
-	if endErr != nil {
-		conductor.log.Error("conductor: tearDownOnDemandInstance broker.EndSession incomplete; proceeding to wind-down + stop",
-			"market_id", marketID,
-			"session_id", singleMemberSessionID,
-			"account_id", accountID,
-			"err", endErr,
-		)
+	// ---- OFF-LOCK: broker.EndSession for ALL active members (OnDemand = discard) ----
+	// Forward-progress on any error — the on-demand teardown contract is "always reach
+	// Stop + reap." Every on-demand account (human and agents alike) is ephemeral:
+	// EndSession must be called for each to drop the LoadedAccount from the shard and
+	// delete the Redis snapshot. Calling it for only one member left the rest with live
+	// shard sessions, causing StartSession to fail on the next bring-up for those accounts.
+	for _, cmd := range endCmds {
+		if endErr := conductor.broker.EndSession(ctx, funnel.SessionEndCmd{
+			AccountID: funnel.AccountID(cmd.accountID),
+			SessionID: funnel.SessionID(cmd.sessionID),
+			Mode:      lifecycle.OnDemand,
+		}); endErr != nil {
+			conductor.log.Error("conductor: tearDownOnDemandInstance broker.EndSession incomplete for member; proceeding",
+				"market_id", marketID,
+				"session_id", cmd.sessionID,
+				"account_id", cmd.accountID,
+				"err", endErr,
+			)
+		}
 	}
 
 	// ---- OFF-LOCK: agent wind-down ----

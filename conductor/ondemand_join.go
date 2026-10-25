@@ -139,12 +139,39 @@ func (conductor *Conductor) JoinOnDemand(ctx context.Context, agentUserID UserID
 
 	// ---- FINALIZE (lock take #2 — microseconds) ----
 	conductor.reg.mu.Lock()
+	freshMarketRecord := conductor.reg.markets[resolvedMarketID]
+	if freshMarketRecord == nil {
+		// Market was torn down while JoinOnDemand was in the off-lock phase. Roll back
+		// the conductor-side reservation. StartSession already ran on the broker, so
+		// the shard has a live ephemeral session that must be discarded off-lock below.
+		delete(conductor.reg.sessions, sessionID)
+		if conductor.reg.byUser[agentUserID] == reservedSession {
+			delete(conductor.reg.byUser, agentUserID)
+		}
+		conductor.reg.mu.Unlock()
+		if endErr := conductor.broker.EndSession(ctx, funnel.SessionEndCmd{
+			AccountID: funnel.AccountID(string(accountID)),
+			SessionID: funnel.SessionID(sessionID),
+			Mode:      lifecycle.OnDemand,
+		}); endErr != nil {
+			conductor.log.Error("conductor: JoinOnDemand rollback EndSession failed — broker-side session may linger",
+				"session_id", sessionID,
+				"user", agentUserID,
+				"account_id", accountID,
+				"err", endErr,
+			)
+		}
+		conductor.log.Warn("conductor: JoinOnDemand market torn down during finalize — session rolled back",
+			"session_id", sessionID,
+			"user", agentUserID,
+			"market_id", resolvedMarketID,
+		)
+		return JoinResult{}, fmt.Errorf("conductor: JoinOnDemand: market torn down during finalize: %w", ErrMarketNotLive)
+	}
 	reservedSession.Account = AccountID(string(accountID))
 	reservedSession.Participant = participantID
 	reservedSession.State = Active
-	if freshMarketRecord := conductor.reg.markets[resolvedMarketID]; freshMarketRecord != nil {
-		freshMarketRecord.members[sessionID] = struct{}{}
-	}
+	freshMarketRecord.members[sessionID] = struct{}{}
 	conductor.reg.mu.Unlock()
 	conductor.log.Info("conductor: JoinOnDemand committed Active",
 		"session_id", sessionID,
