@@ -69,7 +69,7 @@ func main() {
 	brokerCfg := bringup.BrokerConfig{
 		BrokerID:        "B-1",
 		ShardCount:      4,
-		InboxDepth:      64,
+		InboxDepth:      512,
 		Country:         "IN",
 		StartingCapital: 10_00_000, // 10 lakh coins, illustrative
 		StartingBank:    0,
@@ -176,6 +176,7 @@ func main() {
 		Market:         runtime.Market,
 		Agents:         conductor.NewHTTPAgentOrchestrator(agentServerURL, brokerCfg.BrokerID, brokerCfg.Country, nil),
 		BringUpTimeout: 5 * time.Minute,
+		JoinTimeout:    30 * time.Second,
 	})
 	if err != nil {
 		slog.Error("server: conductor.NewConductor failed", "err", err)
