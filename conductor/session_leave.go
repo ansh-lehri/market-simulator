@@ -343,9 +343,11 @@ func (conductor *Conductor) tearDownOnDemandInstance(ctx context.Context, market
 	}
 	market.State = TearingDown
 
-	// On-demand carries exactly one member (the single user whose
-	// session this ephemeral market was spun up for). Snapshot it so
-	// the off-lock EndSession can target the account.
+	// On-demand starts with one member (the human who triggered spin-up),
+	// but agents are joined concurrently during bring-up and their sessions
+	// are also registered in market.members. Snapshot the human's session
+	// for the off-lock EndSession call; the reap step below cleans up all
+	// members.
 	var singleMemberSessionID SessionID
 	for sessionID := range market.members {
 		singleMemberSessionID = sessionID
@@ -373,6 +375,14 @@ func (conductor *Conductor) tearDownOnDemandInstance(ctx context.Context, market
 			)
 		}
 		conductor.reg.mu.Lock()
+		for memberSessionID := range market.members {
+			if sess := conductor.reg.sessions[memberSessionID]; sess != nil {
+				delete(conductor.reg.sessions, memberSessionID)
+				if byUserEntry := conductor.reg.byUser[sess.User]; byUserEntry == sess {
+					delete(conductor.reg.byUser, sess.User)
+				}
+			}
+		}
 		delete(conductor.reg.markets, marketID)
 		conductor.reg.mu.Unlock()
 		return
@@ -425,19 +435,27 @@ func (conductor *Conductor) tearDownOnDemandInstance(ctx context.Context, market
 	}
 
 	// ---- REAP (lock take #2) ----
+	// Iterate all members: market.members holds both the human's session and
+	// every agent session that reached Active state during the bring-up fan-out.
+	// Cleaning only the human's session left agent sessions orphaned in byUser,
+	// causing ErrLiveElsewhere (409) for those agents on the next bring-up.
 	conductor.reg.mu.Lock()
-	if liveSession := conductor.reg.sessions[singleMemberSessionID]; liveSession != nil {
-		delete(conductor.reg.sessions, singleMemberSessionID)
-		if byUserHit := conductor.reg.byUser[liveSession.User]; byUserHit == liveSession {
-			delete(conductor.reg.byUser, liveSession.User)
+	reaped := 0
+	for memberSessionID := range market.members {
+		if sess := conductor.reg.sessions[memberSessionID]; sess != nil {
+			delete(conductor.reg.sessions, memberSessionID)
+			if byUserEntry := conductor.reg.byUser[sess.User]; byUserEntry == sess {
+				delete(conductor.reg.byUser, sess.User)
+			}
+			reaped++
 		}
 	}
 	delete(conductor.reg.markets, marketID)
 	conductor.reg.mu.Unlock()
 	conductor.log.Info("conductor: tearDownOnDemandInstance reap complete",
 		"market_id", marketID,
-		"session_id", singleMemberSessionID,
-		"user", userID,
+		"tag", marketTagForTeardown,
+		"reaped_sessions", reaped,
 	)
 }
 
