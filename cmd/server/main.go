@@ -170,11 +170,12 @@ func main() {
 	// (LiquidityOperator has no real implementation yet; separate,
 	// unbuilt market-infra concern, not addressed by this change).
 	cond, err := conductor.NewConductor(conductor.Config{
-		CfgDir:    marketCfgDir,
-		OHLCVPool: ohlcvPool,
-		Broker:    runtime.Broker,
-		Market:    runtime.Market,
-		Agents:    conductor.NewHTTPAgentOrchestrator(agentServerURL, brokerCfg.BrokerID, brokerCfg.Country, nil),
+		CfgDir:         marketCfgDir,
+		OHLCVPool:      ohlcvPool,
+		Broker:         runtime.Broker,
+		Market:         runtime.Market,
+		Agents:         conductor.NewHTTPAgentOrchestrator(agentServerURL, brokerCfg.BrokerID, brokerCfg.Country, nil),
+		BringUpTimeout: 5 * time.Minute,
 	})
 	if err != nil {
 		slog.Error("server: conductor.NewConductor failed", "err", err)
