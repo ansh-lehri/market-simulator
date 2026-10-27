@@ -140,10 +140,14 @@ func (conductor *Conductor) JoinOnDemand(ctx context.Context, agentUserID UserID
 	// ---- FINALIZE (lock take #2 — microseconds) ----
 	conductor.reg.mu.Lock()
 	freshMarketRecord := conductor.reg.markets[resolvedMarketID]
-	if freshMarketRecord == nil {
-		// Market was torn down while JoinOnDemand was in the off-lock phase. Roll back
-		// the conductor-side reservation. StartSession already ran on the broker, so
-		// the shard has a live ephemeral session that must be discarded off-lock below.
+	// Two rollback triggers:
+	//   nil — market was fully reaped (REAP ran before we took lock #2).
+	//   State != Live — market is TearingDown (FLIP ran but REAP hasn't yet).
+	// Both mean the session must be discarded: the broker has a live ephemeral
+	// session from StartSession above that will otherwise be orphaned — never
+	// EndSession'd, leaving it blocking the next bring-up for this agent and
+	// keeping a stale exchange-inbound binding alive past exchange.Stop().
+	if freshMarketRecord == nil || freshMarketRecord.State != Live {
 		delete(conductor.reg.sessions, sessionID)
 		if conductor.reg.byUser[agentUserID] == reservedSession {
 			delete(conductor.reg.byUser, agentUserID)
@@ -161,12 +165,13 @@ func (conductor *Conductor) JoinOnDemand(ctx context.Context, agentUserID UserID
 				"err", endErr,
 			)
 		}
-		conductor.log.Warn("conductor: JoinOnDemand market torn down during finalize — session rolled back",
+		conductor.log.Warn("conductor: JoinOnDemand market not live during finalize — session rolled back",
 			"session_id", sessionID,
 			"user", agentUserID,
 			"market_id", resolvedMarketID,
+			"market_present", freshMarketRecord != nil,
 		)
-		return JoinResult{}, fmt.Errorf("conductor: JoinOnDemand: market torn down during finalize: %w", ErrMarketNotLive)
+		return JoinResult{}, fmt.Errorf("conductor: JoinOnDemand: market not live during finalize: %w", ErrMarketNotLive)
 	}
 	reservedSession.Account = AccountID(string(accountID))
 	reservedSession.Participant = participantID
