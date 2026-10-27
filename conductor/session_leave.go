@@ -307,14 +307,21 @@ func (conductor *Conductor) handleSessionExit(responseWriter http.ResponseWriter
 //
 //  2. OFF-LOCK (THE RULE — the registry mutex is never held across
 //     any of these call-outs):
+//     - agents.WindDown: stop the throwaway agent population first.
+//       This is intentionally before broker.EndSession — if EndSession
+//       ran first, agents still placing orders would race their
+//       PlaceOrder commands against the DiscardSession in the shard
+//       queue; a timeout would leave sessions live when Stop() closed
+//       the Inbound, causing a "send on closed channel" panic on any
+//       PlaceOrder processed after Stop. WindDown-first means the
+//       shard queue drains quickly (no new orders) and EndSession
+//       completes without timeout.
 //     - broker.EndSession(Mode=OnDemand): routes a DiscardSession to
 //       the owning shard, which drops the ephemeral LoadedAccount
 //       and deletes the Redis snapshot. LOG + PROCEED on error —
 //       the ephemeral account is gone regardless; a stale snapshot
 //       is TTL-cleaned; the user's intent to end the session is
 //       honored by reaching Stop + reap unconditionally.
-//     - agents.WindDown: fire-and-forget signal to the agent
-//       orchestrator so the throwaway population unwinds.
 //     - exchange.Stop: shuts the exchange handle; tape close lets
 //       market-data self-clean its FanOut.
 //
@@ -410,7 +417,34 @@ func (conductor *Conductor) tearDownOnDemandInstance(ctx context.Context, market
 		"user", logUserID,
 	)
 
+	// ---- OFF-LOCK: agent wind-down FIRST ----
+	// WindDown runs before broker.EndSession intentionally. Agents are still placing
+	// orders while the shard is live; if we called EndSession first, the shard queue
+	// would receive both a DiscardSession command (from EndSession) and concurrent
+	// PlaceOrder commands (from the still-running agents). If EndSession timed out
+	// before the shard drained those PlaceOrders, the session would remain live in
+	// the shard when exchange.Stop() closed the Inbound — any subsequent PlaceOrder
+	// processed by the shard after Stop would panic on the closed channel.
+	//
+	// With WindDown first, agents are fully stopped before EndSession is called.
+	// The shard then drains only the few already-queued PlaceOrders (placed just
+	// before context cancellation) and then processes the DiscardSession quickly,
+	// eliminating the EndSession timeout window and the orphaned-session / closed-
+	// channel race.
+	//
+	// Forward-progress on error — the teardown contract is "always reach Stop + reap."
+	if windDownErr := conductor.agents.WindDown(ctx, marketID, marketTagForTeardown, OnDemand); windDownErr != nil {
+		conductor.log.Error("conductor: tearDownOnDemandInstance agents.WindDown failed; proceeding to broker EndSession and exchange stop",
+			"market_id", marketID,
+			"err", windDownErr,
+		)
+	}
+
 	// ---- OFF-LOCK: broker.EndSession for ALL active members (OnDemand = discard) ----
+	// Runs AFTER WindDown so no new PlaceOrders arrive while EndSession is in flight.
+	// The shard drains any last in-flight PlaceOrders (queued before agent context
+	// cancellation), then processes each DiscardSession — all while the exchange is
+	// still alive, so punch never hits a closed channel.
 	// Forward-progress on any error — the on-demand teardown contract is "always reach
 	// Stop + reap." Every on-demand account (human and agents alike) is ephemeral:
 	// EndSession must be called for each to drop the LoadedAccount from the shard and
@@ -429,16 +463,6 @@ func (conductor *Conductor) tearDownOnDemandInstance(ctx context.Context, market
 				"err", endErr,
 			)
 		}
-	}
-
-	// ---- OFF-LOCK: agent wind-down ----
-	// Forward-progress on error — the teardown contract is "always
-	// reach Stop + reap," same as the broker.EndSession call above.
-	if windDownErr := conductor.agents.WindDown(ctx, marketID, marketTagForTeardown, OnDemand); windDownErr != nil {
-		conductor.log.Error("conductor: tearDownOnDemandInstance agents.WindDown failed; proceeding to exchange stop",
-			"market_id", marketID,
-			"err", windDownErr,
-		)
 	}
 
 	// ---- OFF-LOCK: exchange stop ----
