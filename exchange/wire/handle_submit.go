@@ -71,6 +71,29 @@ func (shard *Shard) handleSubmit(state *InstrumentState, brokerID contract.Broke
 		state.emitter.EmitQuote(state.book.Quote())
 		state.emitter.EmitDepth(depthSnapshotFrom(state.book))
 	}
+
+	// Notify each maker whose resting order was (partially or fully) hit.
+	// Each trade carries the maker's BrokerID (set at submission time via
+	// RestingOrder.BrokerID). A missing BrokerID means the order was seeded
+	// outside the normal inbound path (tests, manual seeds) — skip those.
+	for _, trade := range match.Trades {
+		if trade.MakerBrokerID == "" {
+			continue
+		}
+		slog.Debug("handleSubmit: emitting MakerFill",
+			"makerOrderID", trade.MakerOrder,
+			"makerBrokerID", trade.MakerBrokerID,
+			"takerOrderID", trade.TakerOrder,
+			"price", trade.Price,
+			"qty", trade.Qty,
+		)
+		state.emitter.EmitResult(contract.EngineResult{
+			Outcome:  contract.OutcomeMakerFill,
+			OrderID:  trade.MakerOrder,
+			BrokerID: trade.MakerBrokerID,
+			Match:    &contract.MatchResult{Trades: []contract.Trade{trade}},
+		})
+	}
 }
 
 // depthSnapshotFrom builds one emit.DepthSnapshot from two book.TopN calls.

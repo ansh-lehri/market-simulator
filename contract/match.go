@@ -27,6 +27,7 @@ type Trade struct {
 	TakerSide        Side // maker side is the opposite
 	TakerParticipant ParticipantID
 	MakerParticipant ParticipantID
+	MakerBrokerID    BrokerID // routes OutcomeMakerFill back to the maker's broker
 }
 
 // MatchResult is the matcher's whole output for one incoming order. One
