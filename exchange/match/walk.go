@@ -117,6 +117,7 @@ walkLoop:
 			TakerSide:        order.Side,
 			TakerParticipant: order.Participant,
 			MakerParticipant: frontOrder.Participant,
+			MakerBrokerID:    frontOrder.BrokerID,
 		})
 
 		matcher.book.ReduceFront(bestLevel, fillQty)
