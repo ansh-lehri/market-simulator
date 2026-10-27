@@ -40,6 +40,20 @@ func (ownerShard *shard) handleApplyResult(cmd ApplyResult) {
 		"outcome", result.Outcome,
 	)
 
+	// Guard: the session may have been discarded (EndSession/DiscardSession during
+	// on-demand teardown) while this result was queued in the exchange's Private
+	// channel. The account's money state was already cleaned up by EndSession, so
+	// attempting settlement would hit mustGetAccount on a gone account and panic.
+	// Skip the result — the session is gone, there is nothing to settle against.
+	if _, isLive := ownerShard.sessions[cmd.AccountID]; !isLive {
+		slog.Info("funnel: handleApplyResult — session ended, dropping stale result",
+			"account_id", cmd.AccountID,
+			"order_id", result.OrderID,
+			"outcome", result.Outcome,
+		)
+		return
+	}
+
 	switch result.Outcome {
 	case contract.OutcomeMatched:
 		ownerShard.settleMatch(cmd.AccountID, result)
