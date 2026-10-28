@@ -398,6 +398,9 @@ func (conductor *Conductor) MountRoutes(mux *http.ServeMux) {
 	mux.HandleFunc(PathMarkets, conductor.handleMarkets)
 	mux.HandleFunc(PathInstruments, conductor.handleInstruments)
 	mux.HandleFunc(PathAccountOpen, conductor.handleAccountOpen)
+	mux.HandleFunc(PathEarlyAccessRegister, conductor.handleEarlyAccessRegister)
+	mux.HandleFunc(PathGuestQuota, conductor.handleGuestQuota)
+	mux.HandleFunc(PathGuestConsume, conductor.handleGuestConsume)
 	conductor.log.Info("conductor: routes mounted",
 		"liveness", LivenessPath,
 		"join_canonical", PathSessionCanonical,
@@ -410,5 +413,8 @@ func (conductor *Conductor) MountRoutes(mux *http.ServeMux) {
 		"markets", PathMarkets,
 		"instruments", PathInstruments,
 		"account_open", PathAccountOpen,
+		"early_access_register", PathEarlyAccessRegister,
+		"guest_quota", PathGuestQuota,
+		"guest_consume", PathGuestConsume,
 	)
 }
