@@ -78,8 +78,14 @@ type joinResponseBody struct {
 // internal state (wrapped stack details, prefixes, etc.) is passed
 // through verbatim so a developer looking at a failing request can see
 // what the flow actually surfaced.
+//
+// Reason is a machine-readable snake_case code emitted on 409 join
+// responses so the frontend can distinguish sub-types without parsing
+// the human-readable Error string. Omitted on all non-conflict
+// responses. Values used today: "market_not_live", "session_conflict".
 type errorBody struct {
-	Error string `json:"error"`
+	Error  string `json:"error"`
+	Reason string `json:"reason,omitempty"`
 }
 
 // --- status mapper (Stage 1; left in place) --------------------------
@@ -231,7 +237,19 @@ func (conductor *Conductor) handleJoinCanonical(responseWriter http.ResponseWrit
 	)
 	status := joinStatusFor(joinErr)
 	if joinErr != nil {
-		writeError(responseWriter, status, joinErr.Error(), PathSessionCanonical)
+		// Emit a machine-readable reason code on 409 so the frontend can
+		// distinguish "market not live yet" (timing race — no session
+		// conflict, just retry) from a true session-conflict 409 (user
+		// already holds a session the conductor or broker knows about).
+		reason := ""
+		if status == http.StatusConflict {
+			if errors.Is(joinErr, ErrMarketNotLive) {
+				reason = "market_not_live"
+			} else {
+				reason = "session_conflict"
+			}
+		}
+		writeJSON(responseWriter, status, errorBody{Error: joinErr.Error(), Reason: reason}, PathSessionCanonical)
 		return
 	}
 
