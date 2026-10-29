@@ -49,8 +49,8 @@ const (
 // bug mapped to 400 (not a setup failure).
 const (
 	onDemandDurationMinMinutes     = 5
-	onDemandDurationDefaultMinutes = 60
-	onDemandDurationMaxMinutes     = 120
+	onDemandDurationDefaultMinutes = 30
+	onDemandDurationMaxMinutes     = 60
 )
 
 // --- JSON wire shapes -------------------------------------------------
@@ -83,8 +83,8 @@ type onDemandRequestBody struct {
 // different contract revision overrides the whole list there, with no
 // code change here.
 const (
-	practiceConditionNormalDay     = "normal_day"
-	practiceConditionCalmRange     = "calm_range"
+	practiceConditionNormalDay     = "normal"
+	practiceConditionCalmRange     = "calm"
 	practiceConditionTrendingDay   = "trending_day"
 	practiceConditionWhipsaw       = "whipsaw"
 	practiceConditionUnstableDay   = "unstable_day"
@@ -118,7 +118,7 @@ func buildPracticeConditionSet(allowed []string) map[string]bool {
 // package-level list.
 //
 //   - "" (field omitted) is legal and means "no condition requested" —
-//     passed through as empty, not defaulted to normal_day. What "no
+//     passed through as empty, not defaulted to normal. What "no
 //     scenario" means downstream is the agent-orchestrator's call, not
 //     this HTTP layer's.
 //   - a non-empty value outside the configured set is a client bug:
@@ -253,9 +253,9 @@ func onDemandStatusFor(err error) int {
 // Rules (locked by the design):
 //
 //   - absent (empty value, including a missing param) → use the
-//     configured default (60 minutes).
+//     configured default (30 minutes).
 //   - present but non-integer → error (e.g. "abc", "5m", "1.5").
-//   - present integer below min (5) or above max (120) → error.
+//   - present integer below min (5) or above max (60) → error.
 //   - 0 is not a special case: it fails the min guard and errors with
 //     a clear out-of-range message.
 //
@@ -271,7 +271,7 @@ func parseOnDemandDuration(query string) (int, error) {
 		return 0, errors.New("duration must be an integer number of minutes")
 	}
 	if parsed < onDemandDurationMinMinutes || parsed > onDemandDurationMaxMinutes {
-		return 0, errors.New("duration out of range (must be between 5 and 120 minutes)")
+		return 0, errors.New("duration out of range (must be between 5 and 60 minutes)")
 	}
 	return parsed, nil
 }
