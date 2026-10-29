@@ -86,8 +86,8 @@ func TestParsePracticeCondition(t *testing.T) {
 		wantErr bool
 	}{
 		{"empty is legal (no condition requested)", "", "", false},
-		{"normal_day accepted", "normal_day", "normal_day", false},
-		{"calm_range accepted", "calm_range", "calm_range", false},
+		{"normal accepted", "normal", "normal", false},
+		{"calm accepted", "calm", "calm", false},
 		{"trending_day accepted", "trending_day", "trending_day", false},
 		{"whipsaw accepted", "whipsaw", "whipsaw", false},
 		{"unstable_day accepted", "unstable_day", "unstable_day", false},
