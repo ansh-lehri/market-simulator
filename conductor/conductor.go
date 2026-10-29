@@ -25,10 +25,11 @@ type wsHandlerFactoryFn func(fanOut *marketdata.FanOut, cfg marketdata.WSConfig)
 const LivenessPath = "/v1/_conductor/live"
 
 // DefaultBringUpTimeout bounds the synchronous AgentOrchestrator.BringUp
-// call made during canonical market bring-up. Picked as a round-number
-// upper bound well above a healthy orchestrator's response time; the
-// value is a dial on Config.BringUpTimeout.
-const DefaultBringUpTimeout = 30 * time.Second
+// call made during canonical market bring-up. Set high enough to cover the
+// agent account-open pass (up to 1000 agents × 2 serial Core→DB calls at
+// ~300 ms each over an inter-region link) while still failing loudly if the
+// orchestrator is genuinely hung. Config.BringUpTimeout overrides.
+const DefaultBringUpTimeout = 12 * time.Minute
 
 // DefaultJoinTimeout bounds the per-request context the canonical-join
 // handler installs around JoinCanonical. One EnsureAccount round-trip
@@ -50,14 +51,12 @@ const DefaultAccountOpenTimeout = 3 * time.Second
 // DefaultSetupTimeout bounds the per-request context the on-demand
 // trigger handler installs around StartOnDemand. The held setup walks
 // EnsureAccount → QualifyOnDemand → agents.BringUp → NewExchange →
-// WireInstance (both axes) → Start → StartSession; the dominant cost
-// is agents.BringUp (synchronous orchestrator round-trip) plus the
-// StartSession shard reply over the account's durable load. Ninety
-// seconds is loose enough that a healthy stack never trips it even
-// with a slow orchestrator, tight enough that a wedged request
-// surfaces to the client as a 503 within a browser's attention span.
+// WireInstance (both axes) → Start → StartSession; the dominant cost is
+// agents.BringUp (the orchestrator's per-agent account-open pass over a
+// potentially inter-region Core→DB link). Set to DefaultBringUpTimeout
+// plus five minutes of headroom for the non-BringUp steps.
 // Config.SetupTimeout overrides.
-const DefaultSetupTimeout = 90 * time.Second
+const DefaultSetupTimeout = 17 * time.Minute
 
 // DefaultCloseTimeout bounds the per-sweep context the per-market
 // timer installs around closeCanonicalMarket's broker.FinalizeMarket
