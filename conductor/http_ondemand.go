@@ -83,21 +83,19 @@ type onDemandRequestBody struct {
 // different contract revision overrides the whole list there, with no
 // code change here.
 const (
-	practiceConditionNormalDay     = "normal"
-	practiceConditionCalmRange     = "calm"
-	practiceConditionTrendingDay   = "trending_day"
-	practiceConditionWhipsaw       = "whipsaw"
-	practiceConditionUnstableDay   = "unstable_day"
-	practiceConditionThinLiquidity = "thin_liquidity"
+	practiceConditionNormal     = "normal"
+	practiceConditionCalm       = "calm"
+	practiceConditionBusy       = "busy"
+	practiceConditionThin       = "thin"
+	practiceConditionDispersion = "dispersion"
 )
 
 var defaultPracticeConditions = []string{
-	practiceConditionNormalDay,
-	practiceConditionCalmRange,
-	practiceConditionTrendingDay,
-	practiceConditionWhipsaw,
-	practiceConditionUnstableDay,
-	practiceConditionThinLiquidity,
+	practiceConditionNormal,
+	practiceConditionCalm,
+	practiceConditionBusy,
+	practiceConditionThin,
+	practiceConditionDispersion,
 }
 
 // buildPracticeConditionSet turns a flat allowlist into the O(1)-lookup

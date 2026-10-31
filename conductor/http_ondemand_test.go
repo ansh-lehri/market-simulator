@@ -88,12 +88,11 @@ func TestParsePracticeCondition(t *testing.T) {
 		{"empty is legal (no condition requested)", "", "", false},
 		{"normal accepted", "normal", "normal", false},
 		{"calm accepted", "calm", "calm", false},
-		{"trending_day accepted", "trending_day", "trending_day", false},
-		{"whipsaw accepted", "whipsaw", "whipsaw", false},
-		{"unstable_day accepted", "unstable_day", "unstable_day", false},
-		{"thin_liquidity accepted", "thin_liquidity", "thin_liquidity", false},
+		{"busy accepted", "busy", "busy", false},
+		{"thin accepted", "thin", "thin", false},
+		{"dispersion accepted", "dispersion", "dispersion", false},
 		{"unknown value rejected", "volcano", "", true},
-		{"wrong case rejected", "Whipsaw", "", true},
+		{"wrong case rejected", "Busy", "", true},
 	}
 	allowed := buildPracticeConditionSet(defaultPracticeConditions)
 	for _, testCase := range cases {
@@ -133,15 +132,15 @@ func TestHandleStartOnDemand_UnknownConditionReturns400(t *testing.T) {
 
 func TestHandleStartOnDemand_ConditionReachesAgentBringUpRequest(t *testing.T) {
 	harness := newOnDemandHarness(t, "IN")
-	body := `{"user":{"user_id":"human-cond-good"},"condition":"whipsaw"}`
+	body := `{"user":{"user_id":"human-cond-good"},"condition":"dispersion"}`
 	recorder := postOnDemand(t, harness.conductor, http.MethodPost, "market=IN&duration=30", body)
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200. body=%q", recorder.Code, recorder.Body.String())
 	}
 	gotRequest := harness.agents.lastRequestSnapshot()
-	if gotRequest.Scenario != "whipsaw" {
-		t.Errorf("AgentBringUpRequest.Scenario = %q, want %q", gotRequest.Scenario, "whipsaw")
+	if gotRequest.Scenario != "dispersion" {
+		t.Errorf("AgentBringUpRequest.Scenario = %q, want %q", gotRequest.Scenario, "dispersion")
 	}
 }
 
@@ -150,8 +149,8 @@ func TestHandleStartOnDemand_ConditionReachesAgentBringUpRequest(t *testing.T) {
 // — the whole reason this isn't a fixed package-level list — by
 // building a Conductor with a custom, single-value allowlist and
 // checking that: (a) a value outside it is rejected even though it's
-// one of the frontend contract's six default values, and (b) the one
-// value the override DOES allow is accepted even though it is not in
+// one of the contract's five default values, and (b) the one value
+// the override DOES allow is accepted even though it is not in
 // defaultPracticeConditions at all.
 func TestHandleStartOnDemand_PracticeConditionAllowlistIsConfigurable(t *testing.T) {
 	marketTag := MarketTag("IN")
@@ -189,12 +188,12 @@ func TestHandleStartOnDemand_PracticeConditionAllowlistIsConfigurable(t *testing
 		conductor.Stop()
 	})
 
-	// A default-list value ("whipsaw") is rejected because the override
+	// A default-list value ("busy") is rejected because the override
 	// replaced the whole list, not appended to it.
 	rejected := postOnDemand(t, conductor, http.MethodPost,
-		"market=IN&duration=30", `{"user":{"user_id":"human-override-1"},"condition":"whipsaw"}`)
+		"market=IN&duration=30", `{"user":{"user_id":"human-override-1"},"condition":"busy"}`)
 	if rejected.Code != http.StatusBadRequest {
-		t.Fatalf("whipsaw against custom allowlist: status = %d, want 400. body=%q",
+		t.Fatalf("busy against custom allowlist: status = %d, want 400. body=%q",
 			rejected.Code, rejected.Body.String())
 	}
 
