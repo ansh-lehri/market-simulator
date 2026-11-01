@@ -75,6 +75,13 @@ func main() {
 		StartingBank:    0,
 		OnDemandMinimum: 0,
 		ReadTimeout:     2 * time.Second,
+		// StoreMaxConns raised from the default (4) to handle the parallel
+		// account-open fan-out from simulation-agents: with concurrency=300
+		// on the agent side, up to 300 OpenAccount requests arrive nearly
+		// simultaneously. 4 connections would queue them into ~75 serial DB
+		// batches, pushing per-request wait past the accountOpenTimeout for
+		// the later arrivals. 32 reduces queue depth to ~10 batches.
+		StoreMaxConns: 32,
 		// CandleReadTimeout / WS* left zero → bringup's own defaults.
 	}
 
@@ -177,6 +184,12 @@ func main() {
 		Agents:         conductor.NewHTTPAgentOrchestrator(agentServerURL, brokerCfg.BrokerID, brokerCfg.Country, nil),
 		BringUpTimeout: 5 * time.Minute,
 		JoinTimeout:    30 * time.Second,
+		// AccountOpenTimeout raised from the default (3 s) to give the
+		// broker's EnsureAccount upsert room to complete over the
+		// inter-region link (Mumbai VM → Tokyo Supabase). Each individual
+		// upsert must finish within this window; 15 s absorbs DB cold-start
+		// and moderate Supabase load spikes without masking genuine hangs.
+		AccountOpenTimeout: 15 * time.Second,
 	})
 	if err != nil {
 		slog.Error("server: conductor.NewConductor failed", "err", err)
