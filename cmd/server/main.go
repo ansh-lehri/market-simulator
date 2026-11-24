@@ -50,7 +50,7 @@ func main() {
 	const (
 		httpAddr          = ":8000"
 		marketCfgDir      = "./configs/markets" // needs at least one <tag>.json before anything can trade
-		conductorPoolSize = int32(4)            // separate from the broker Store's own pool sizing
+		conductorPoolSize = int32(1)            // separate from the broker Store's own pool sizing
 
 		// defaultAgentServerURL is the fallback when AGENT_SERVER_URL is
 		// unset — matches the simulation-agents process's own default
@@ -71,17 +71,25 @@ func main() {
 		ShardCount:      4,
 		InboxDepth:      512,
 		Country:         "IN",
-		StartingCapital: 10_00_000, // 10 lakh coins, illustrative
+		StartingCapital: 1_00_00_000, // 10 lakh coins, illustrative
 		StartingBank:    0,
 		OnDemandMinimum: 0,
-		ReadTimeout:     2 * time.Second,
-		// StoreMaxConns raised from the default (4) to handle the parallel
-		// account-open fan-out from simulation-agents: with concurrency=300
-		// on the agent side, up to 300 OpenAccount requests arrive nearly
-		// simultaneously. 4 connections would queue them into ~75 serial DB
-		// batches, pushing per-request wait past the accountOpenTimeout for
-		// the later arrivals. 32 reduces queue depth to ~10 batches.
-		StoreMaxConns: 32,
+		// ReadTimeout raised to 15s: AccountHandle queries queue behind
+		// up to 100 concurrent JoinOnDemand calls at session start.
+		ReadTimeout: 15 * time.Second,
+		// CandleReadTimeout raised to 15s: pullHistory runs concurrently
+		// with installRemainingAgents (100 concurrent AccountHandle
+		// queries). Each candle request can wait ~3s in the store pool
+		// queue before getting a connection; 15s gives safe headroom.
+		CandleReadTimeout: 15 * time.Second,
+		// Full Supabase session-mode budget (pool_size=15, 1 slack):
+		//   shards(4×1=4) + store(5) + conductor(1) + agents(4) = 14
+		// ShardMaxConns=1: 4 shard bundle pools × 1 connection each.
+		// StoreMaxConns=5: broker reads + candle reads share this pool.
+		// Each shard pool was previously unset → pgxpool default
+		// max(4,NumCPU) = 16+ connections just from shards alone.
+		ShardMaxConns: 1,
+		StoreMaxConns: 5,
 		// CandleReadTimeout / WS* left zero → bringup's own defaults.
 	}
 
@@ -184,12 +192,12 @@ func main() {
 		Agents:         conductor.NewHTTPAgentOrchestrator(agentServerURL, brokerCfg.BrokerID, brokerCfg.Country, nil),
 		BringUpTimeout: 5 * time.Minute,
 		JoinTimeout:    30 * time.Second,
-		// AccountOpenTimeout raised from the default (3 s) to give the
-		// broker's EnsureAccount upsert room to complete over the
-		// inter-region link (Mumbai VM → Tokyo Supabase). Each individual
-		// upsert must finish within this window; 15 s absorbs DB cold-start
-		// and moderate Supabase load spikes without masking genuine hangs.
-		AccountOpenTimeout: 15 * time.Second,
+		// AccountOpenTimeout raised to 30s: with AccountOpenConcurrency=5
+		// on the agent side and StoreMaxConns=8 on the broker, each
+		// individual EnsureAccount call completes in ~300ms. 30s gives
+		// headroom for Supabase cold-starts and transient spikes without
+		// masking genuine hangs.
+		AccountOpenTimeout: 30 * time.Second,
 	})
 	if err != nil {
 		slog.Error("server: conductor.NewConductor failed", "err", err)
