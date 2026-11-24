@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"sync"
 	"time"
+	"os"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -324,6 +325,10 @@ func (conductor *Conductor) Start() error {
 	tags, listErr := listConfiguredMarkets(conductor.cfgDir)
 	if listErr != nil {
 		return fmt.Errorf("conductor: Start: list configured markets: %w", listErr)
+	}
+	if os.Getenv("DISABLE_CANONICAL") == "1" {
+		conductor.log.Info("conductor: canonical sessions disabled via DISABLE_CANONICAL env var, no timers spawned")
+		return nil
 	}
 	conductor.log.Info("conductor: Start spawning per-market timers",
 		"cfg_dir", conductor.cfgDir,
