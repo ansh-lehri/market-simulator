@@ -9,7 +9,7 @@
     {"at": "15:30", "phase": "closing_auction"},
     {"at": "15:40", "phase": "closed"}
   ],
-  "ondemand": {"duration": "60m", "warmup": "2m"},
+  "ondemand": {"duration": "60m", "warmup": "5m"},
   "instruments": [
     {
       "id": "SYNTH_DEF",

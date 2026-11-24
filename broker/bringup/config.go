@@ -8,6 +8,12 @@ import (
 	"simulator/broker/funnel"
 )
 
+// defaultShardMaxConns is the per-shard bundle pool size when the
+// caller leaves BrokerConfig.ShardMaxConns at zero. 2 is the
+// minimum per P1-D2 for normal deployments; Supabase session-mode
+// deployments set ShardMaxConns explicitly to 1.
+const defaultShardMaxConns int32 = 2
+
 // defaultStoreMaxConns is the Store pool's conservative size when the
 // caller leaves BrokerConfig.StoreMaxConns at zero. The Store serves
 // the five durable reads + the durable transfer — a few concurrent
@@ -74,6 +80,13 @@ type BrokerConfig struct {
 	// via buildCountryStack (country.go). Required; must be in the
 	// allowlist. "IN" is wired for Phase 1.
 	Country string
+
+	// ShardMaxConns caps each per-shard bundle pool's connection count.
+	// Zero → defaultShardMaxConns (2). There are ShardCount pools, so
+	// total shard connections = ShardCount × ShardMaxConns. On
+	// Supabase session-mode (pool_size=15) set this to 1 to share the
+	// budget across all pools; normal deployments use the default (2).
+	ShardMaxConns int32
 
 	// StoreMaxConns caps the Store pool's connection count. Zero →
 	// defaultStoreMaxConns (4). The Store pool is separate from each
@@ -222,6 +235,17 @@ func (brokerCfg BrokerConfig) validate() error {
 		return fmt.Errorf("WSWriteTimeout=%v (must be >= 0): %w", brokerCfg.WSWriteTimeout, ErrBadConfig)
 	}
 	return nil
+}
+
+// shardMaxConnsOrDefault returns the configured ShardMaxConns, falling
+// back to defaultShardMaxConns on zero. Negative is coerced to the
+// default; a signed int32 slipping to negative would otherwise blow up
+// pgxpool.
+func (brokerCfg BrokerConfig) shardMaxConnsOrDefault() int32 {
+	if brokerCfg.ShardMaxConns <= 0 {
+		return defaultShardMaxConns
+	}
+	return brokerCfg.ShardMaxConns
 }
 
 // storeMaxConnsOrDefault returns the configured StoreMaxConns, falling

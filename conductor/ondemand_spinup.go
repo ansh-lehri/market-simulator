@@ -114,8 +114,8 @@ type OnDemandResult struct {
 // condition is the optional "practice condition" the frontend's
 // OnDemandRequest.condition field carries (see
 // docs/synthetic-mkt-ui-contract/openapi.yaml's PracticeCondition
-// enum) — one of normal_day/calm_range/trending_day/whipsaw/
-// unstable_day/thin_liquidity, or "" if the caller didn't pick one.
+// enum) — one of normal/calm/busy/thin/dispersion, or "" if the
+// caller didn't pick one.
 // The HTTP handler (handleStartOnDemand) has already validated it
 // against that enum before this is called — StartOnDemand trusts it
 // verbatim and threads it straight into AgentBringUpRequest.Scenario,
