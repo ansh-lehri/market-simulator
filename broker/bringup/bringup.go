@@ -133,8 +133,10 @@ func bringUp(ctx context.Context, brokerCfg BrokerConfig, infraCfg config.Config
 		}
 	}
 	for shardIndex := 0; shardIndex < brokerCfg.ShardCount; shardIndex++ {
+		shardInfra := infraCfg
+		shardInfra.Postgres.MaxConns = brokerCfg.shardMaxConnsOrDefault()
 		wiredBundle, wireErr := capstone.Wire(ctx, capstone.Options{
-			ConnConfig:     infraCfg,
+			ConnConfig:     shardInfra,
 			RedisNamespace: "", // prod — L5 §7 verbatim keys
 			Cost:           stack.Cost,
 			CostAdapter:    stack.Adapter,
