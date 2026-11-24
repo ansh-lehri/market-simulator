@@ -18,7 +18,7 @@ const PathGuestConsume = "/api/guest/consume"
 
 // freeSessionLimit is the number of free practice sessions each guest may start before
 // being asked to register.
-const freeSessionLimit = 3
+const freeSessionLimit = 2
 
 // guestQuotaResponse is the shared response body for quota and consume.
 type guestQuotaResponse struct {
